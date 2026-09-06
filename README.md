@@ -5,6 +5,8 @@ shipments. O projeto e um Modular Monolith em Python, construido para estudar
 DDD, separacao de camadas, persistencia e evolucao para processamento
 assincrono.
 
+[![wakatime](https://wakatime.com/badge/user/dcf0e22a-41eb-4c76-9126-337f24d80641/project/9b48f8c6-cbf6-4789-91b2-eae6d28ae2b1.svg)](https://wakatime.com/badge/user/dcf0e22a-41eb-4c76-9126-337f24d80641/project/9b48f8c6-cbf6-4789-91b2-eae6d28ae2b1)
+
 ## Estado atual
 
 O projeto esta na Fase 2, com o dominio, casos de uso, persistencia SQLAlchemy,
