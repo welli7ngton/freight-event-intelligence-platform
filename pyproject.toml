@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freight-event-intelligence-platform"
+version = "0.1.0"
+description = "Event-driven backend for freight shipment intelligence."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic==1.19.2",
+    "fastapi==0.141.1",
+    "psycopg[binary]==3.3.5",
+    "pydantic==2.13.5",
+    "SQLAlchemy==2.0.52",
+    "uvicorn[standard]==0.52.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx2==2.12.0",
+    "pytest==9.1.1",
+    "ruff==0.11.13",
+    "taskipy==1.14.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-vv --strict-markers"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["app", "tests"]
+exclude = [".venv", "alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/env.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.taskipy.tasks]
+test = "python -m pytest"
+test-fast = "python -m pytest -q"
+test-api = "python -m pytest tests/api"
+lint = "ruff check ."
+lint-fix = "ruff check . --fix"
+format = "ruff format ."
+format-check = "ruff format --check ."
+check = "task format-check && task lint && task test-fast"
+compile = "python -m compileall -q app tests"
+api = "python -m uvicorn app.api.application:app --reload"
+db-up = "docker compose up -d postgres"
+db-down = "docker compose down"
+db-logs = "docker compose logs -f postgres"
+db-migrate = "alembic upgrade head"
+db-rollback = "alembic downgrade -1"
+db-current = "alembic current"
+db-history = "alembic history"
+db-revision = "alembic revision --autogenerate -m"
+setup = "task db-up && task db-migrate"
+ci = "task check && task compile"
