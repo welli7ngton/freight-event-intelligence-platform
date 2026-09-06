@@ -28,10 +28,7 @@ class SQLAlchemyShipmentRepository(ShipmentRepository):
     def save(self, shipment: Shipment) -> None:
         model = to_model(shipment)
 
-        existing = self._session.get(
-            ShipmentModel,
-            shipment.id,
-        )
+        existing = self._session.get(ShipmentModel, shipment.id)
 
         if existing is None:
             self._session.add(model)
@@ -44,3 +41,7 @@ class SQLAlchemyShipmentRepository(ShipmentRepository):
         existing.status = model.status
         existing.created_at = model.created_at
         existing.updated_at = model.updated_at
+
+        existing.current_latitude = model.current_latitude
+        existing.current_longitude = model.current_longitude
+        existing.last_location_at = model.last_location_at

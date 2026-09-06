@@ -5,6 +5,14 @@ from app.domain.shipment.exceptions import InvalidStateTransition
 
 
 class ShipmentStatus(StrEnum):
+    """Lifecycle status values assigned to a shipment.
+
+    Values mean: ``CREATED`` was registered; ``SCHEDULED`` has a planned
+    pickup; ``PICKED_UP`` was collected; ``IN_TRANSIT`` is moving to its
+    destination; ``DELAYED`` is delayed; and ``DELIVERED`` reached its final
+    destination.
+    """
+
     CREATED = "CREATED"
     SCHEDULED = "SCHEDULED"
     PICKED_UP = "PICKED_UP"

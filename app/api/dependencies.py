@@ -25,24 +25,28 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def get_shipment_repository(
-    db: Session = Depends(get_db),
-):
+def get_shipment_repository(db: Session = Depends(get_db)):
     return SQLAlchemyShipmentRepository(db)
 
 
-def get_event_repository(
-    db: Session = Depends(get_db),
-):
+def get_event_repository(db: Session = Depends(get_db)):
     return SQLAlchemyShipmentEventRepository(db)
+
+
+def get_event_handler() -> ShipmentEventHandler:
+    return ShipmentEventHandler()
 
 
 def get_create_shipment_use_case(
     db: Session = Depends(get_db),
 ) -> CreateShipment:
-    repository = SQLAlchemyShipmentRepository(db)
+    shipment_repository = SQLAlchemyShipmentRepository(db)
+    shipment_event_repository = SQLAlchemyShipmentEventRepository(db)
 
-    return CreateShipment(repository)
+    return CreateShipment(
+        shipment_repository=shipment_repository,
+        shipment_event_repository=shipment_event_repository,
+    )
 
 
 def get_get_shipment_use_case(
@@ -63,6 +67,7 @@ def get_get_shipment_events_use_case(
 
 def get_receive_shipment_event_use_case(
     db: Session = Depends(get_db),
+    event_handler: ShipmentEventHandler = Depends(get_event_handler),
 ) -> ReceiveShipmentEvent:
     shipment_repository = SQLAlchemyShipmentRepository(db)
     event_repository = SQLAlchemyShipmentEventRepository(db)
@@ -70,5 +75,5 @@ def get_receive_shipment_event_use_case(
     return ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
-        event_handler=ShipmentEventHandler(),
+        event_handler=event_handler,
     )

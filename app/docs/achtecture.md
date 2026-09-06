@@ -146,27 +146,39 @@ O handler nao persiste, nao faz commit, nao deduplica e nao reprocessa eventos a
 
 `ShipmentRepository` define `get` e `save`.
 
-`ShipmentEventRepository` define `save` e `list_by_shipment`.
+`ShipmentEventRepository` define `exists`, `save` e `list_by_shipment`.
 
 ### Use cases
 
-- `CreateShipment` gera UUID e timestamp UTC, cria a entidade e chama o repository.
+- `CreateShipment` gera UUID e timestamp UTC, cria a entidade `Shipment`, cria o evento `SHIPMENT_CREATED` e persiste tanto a shipment quanto o evento no mesmo fluxo de aplicacao.
 - `GetShipment` consulta uma shipment pelo ID.
 - `GetShipmentEvents` lista eventos de uma shipment.
-- `ReceiveShipmentEvent` busca a shipment, processa o evento pelo handler e salva evento e shipment.
+- `ReceiveShipmentEvent` busca a shipment, processa o evento pelo handler e salva o evento e a shipment atualizada.
 
-Os casos de uso possuem testes com repositories em memoria para validar os contratos principais.
+Os casos de uso possuem testes com repositories em memoria para validar os contratos principais. O teste de criacao agora verifica que a `Shipment` e o evento `SHIPMENT_CREATED` sao gerados e persistidos no mesmo caso de uso.
+
+### Fronteira de responsabilidade
+
+A separacao atual continua sendo a seguinte:
+
+- `API/controller`: recebe a request HTTP, valida os schemas, converte DTO em input da application e devolve a resposta. O controller nao cria eventos de dominio diretamente nem implementa regras de negocio.
+- `Application/Use Case`: orquestra a operacao de negocio completa. `CreateShipment` e responsavel por criar a entidade, criar o `ShipmentEvent(SHIPMENT_CREATED)`, persistir ambos e devolver a entidade atualizada.
+- `Domain`: continua responsavel pela vida da Shipment, transicoes de estado, atualizacao de localizacao, invariantes e validacoes de negocio.
+- `Infrastructure`: repositories persistem estado e eventos; nao decidem regras de negocio nem finalizam a transacao.
 
 ## 5. API implementada
 
 `app.api.application` cria uma instancia FastAPI com titulo `Freight Event Intelligence Platform`, versao `0.1.0`, e inclui os routers de shipments e events.
 
-Rotas declaradas:
+A API atual expõe os seguintes contratos:
 
-- `POST /shipments`: recebe `CreateShipmentRequest` e retorna `ShipmentResponse`;
+- `GET /health`: retorna `{"status": "ok"}`;
+- `POST /shipments`: recebe `CreateShipmentRequest`, cria a `Shipment`, registra internamente o evento `SHIPMENT_CREATED` e retorna `ShipmentResponse`;
 - `GET /shipments/{shipment_id}`: consulta uma shipment e retorna `404` quando nao encontrada;
 - `GET /shipments/{shipment_id}/events`: lista eventos da shipment;
-- `POST /events`: cria um `ShipmentEvent` a partir de `ShipmentEventRequest` e chama `ReceiveShipmentEvent`.
+- `POST /events`: recebe `ShipmentEventRequest` para eventos do lifecycle de uma shipment ja existente e chama `ReceiveShipmentEvent`.
+
+O contrato de criacao do sistema permanece estritamente orientado a `POST /shipments`. Não existe um fluxo alternativo de criacao via `POST /events`.
 
 Schemas implementados:
 
@@ -175,11 +187,120 @@ Schemas implementados:
 - `ShipmentEventRequest`, com UUIDs, tipo de evento, timestamp e payload dict;
 - `ShipmentEventResponse`.
 
-Existem testes de validacao dos schemas e um teste de aplicacao que espera `GET /health` e validacao HTTP `422` para payload invalido. No entanto, a rota `/health` nao esta registrada no codigo atual.
+Os testes de API validam `GET /health`, criacao de shipment, consulta de shipment, consulta de eventos e envio de eventos do lifecycle. O contrato atual reconhece que a criacao de shipment e a criacao do evento `SHIPMENT_CREATED` sao uma mesma operacao de negocio.
 
-As dependencias de API criam sessoes e repositories SQLAlchemy, mas a configuracao atual ainda nao injeta corretamente todas as dependencias necessarias no FastAPI.
+## 6. Atomicidade atual da criacao de Shipment
 
-## 6. Persistencia implementada
+A fronteira transacional atual e definida pela dependencia `get_db()` em `app.api.dependencies`.
+
+Essa dependencia:
+
+- cria a `Session` do SQLAlchemy;
+- disponibiliza a mesma sessao para os repositories da request;
+- executa `commit()` quando a operacao termina com sucesso;
+- executa `rollback()` quando ocorre excecao;
+- fecha a sessao ao final.
+
+A implementacao atual usa a mesma `Session` para os dois repositories da criacao:
+
+```text
+ShipmentRepository
+        |
+        +---- mesma Session SQLAlchemy ----+
+                                           |
+ShipmentEventRepository                   |
+        |                                  |
+        +----------------------------------+
+```
+
+Isso significa que a operacao de criacao de Shipment e registro do evento `SHIPMENT_CREATED` ocorre dentro da mesma transacao da request.
+
+O fluxo conceitual de `POST /shipments` e:
+
+```text
+CreateShipment
+    |
+    +-- cria Shipment
+    |
+    +-- cria ShipmentEvent(SHIPMENT_CREATED)
+    |
+    +-- persiste ambos na mesma Session
+    |
+    +-- commit transacional da request
+```
+
+A semantica correta e que a criacao do evento nao e uma segunda request HTTP nem uma operacao separada do controller. Ela e um efeito de negocio interno do use case `CreateShipment`.
+
+### Comportamento esperado
+
+SUCESSO:
+
+```text
+Shipment.save()
+      +
+ShipmentEvent.save()
+      |
+      v
+   COMMIT da request
+      |
+      v
+ambos persistidos
+```
+
+FALHA:
+
+```text
+Shipment.save()
+      +
+ShipmentEvent.save()
+      |
+      v
+   EXCEPTION
+      |
+      v
+  ROLLBACK da request
+      |
+      v
+nenhum dos dois deve permanecer persistido
+```
+
+Importante: a atomicidade atual nao depende de `commit` individual dentro dos repositories. Os repositories persistem no estado da sessao; a finalizacao transacional e responsabilidade da infraestrutura de sessao/request em `get_db()`.
+
+## 7. SHIPMENT_CREATED e semantica de evento
+
+`SHIPMENT_CREATED` e um evento historico/auditoria de que a shipment foi criada. Ele nao deve ser processado pelo `ShipmentEventHandler` como se fosse uma transicao normal do estado da shipment.
+
+A entidade comeca no estado `CREATED` atraves de `Shipment.create()`. O evento `SHIPMENT_CREATED` registra esse fato, mas nao gera uma transicao artificial:
+
+```text
+Shipment.create()
+    -> Shipment.status = CREATED
+
+ShipmentEvent(
+    event_type = SHIPMENT_CREATED
+)
+```
+
+A regra correta e que o evento e persistido em paralelo com a criacao da entidade, e nao processado por `ShipmentEventHandler` como `CREATED -> CREATED`.
+
+Os eventos subsequentes do lifecycle, como `PICKUP_SCHEDULED`, `PICKUP_COMPLETED`, `SHIPMENT_DEPARTED`, `DELAY_DETECTED`, `DELIVERED` e `LOCATION_UPDATED`, continuam seguindo o fluxo de processamento normal do `ShipmentEventHandler` e da state machine.
+
+## 8. Timestamps e ordem de eventos
+
+A arquitetura continua distinguindo claramente entre:
+
+- `occurred_at`: quando o fato aconteceu no dominio;
+- `received_at`: quando o sistema recebeu/registrou o evento.
+
+Para `SHIPMENT_CREATED`, o valor de `occurred_at` deve coincidir com o momento de criacao da shipment, ou seja:
+
+```text
+Shipment.created_at == ShipmentEvent(SHIPMENT_CREATED).occurred_at
+```
+
+Essa diferenca e importante para evoluir futuramente a politica de eventos fora de ordem. Hoje o sistema ordena eventos por `occurred_at` em consultas e em alguns fluxos, mas ainda nao define uma politica robusta de aceitacao/reprocessamento de eventos atrasados.
+
+## 9. Persistencia implementada
 
 ### Banco e sessao
 
@@ -213,36 +334,41 @@ A migration de localizacao foi aplicada com sucesso usando `alembic upgrade head
 
 Ainda nao existem tabelas `processed_events` ou `outbox_events`.
 
-## 7. Pontos ainda pendentes ou que precisam de decisao
+## 10. Idempotencia atual e limites conhecidos
 
-### Transacao
+O repositorio de eventos define `exists(event_id)` e a implementacao SQLAlchemy verifica a chave primaria antes do processamento. Isso oferece protecao contra processamento repetido em cenarios sequenciais e e usado por `ReceiveShipmentEvent` antes de aplicar a transicao e salvar o evento.
 
-Os repositories alteram a sessao, mas nao fazem `commit` ou `rollback`. Tambem nao existe Unit of Work. O responsavel pelo ciclo transacional ainda precisa ser definido antes de expor o fluxo como operacao persistente de producao.
+No entanto, essa estrategia e limitada:
 
-### Idempotencia
+- ela protege contra duplicidade simples em memoria ou no banco em um fluxo sequencial;
+- nao substitui uma estrategia robusta de concorrencia em ambientes com multiplos consumidores ou paralelismo;
+- ainda nao existe tabela dedicada `processed_events` nem uma politica completa de deduplicacao por corrida de processos;
+- ainda nao existe uma estrategia formal de idempotencia para eventos recebidos fora de ordem.
 
-`event_id` e chave primaria de `shipment_events`, mas nao existe tratamento completo para evento duplicado, tabela `processed_events` ou politica de conflito.
+A documentacao atual deve tratar isso como uma implementacao inicial e parcialmente defensiva, e nao como idempotencia concorrente completa.
 
-### Eventos fora de ordem
+## 11. Eventos fora de ordem
 
-A consulta de eventos ordena por `occurred_at`, mas ainda nao existe politica de aceitacao, rejeicao, armazenamento ou reprocessamento de eventos atrasados.
+A consulta de eventos ordena por `occurred_at`, mas a arquitetura atual nao define uma politica obrigatoria para tratativa de eventos recebidos fora de ordem. A distinção entre `occurred_at` e `received_at` esta preservada como preparacao para evolucao futura, mas a decisao sobre aceitacao, rejeicao, reprocessamento ou arquivamento de eventos atrasados ainda nao foi implementada.
 
-### Payloads
+## 12. Testes e validacao do estado atual
 
-O dominio usa `object` para `payload`. O handler valida apenas o payload de localizacao. Schemas especificos por tipo de evento ainda nao existem.
+Os testes presentes no repositorio confirmam o contrato atual de criacao e processamento de eventos:
 
-### Testes de infraestrutura
+- testes de dominio validam `Shipment`, `ShipmentEvent` e `ShipmentStateMachine`;
+- testes de aplicacao validam `CreateShipment` e `ReceiveShipmentEvent` com repositories em memoria;
+- testes de API validam health, criacao de shipment, consulta de shipment, consulta de eventos e recebimento de evento do lifecycle;
+- o teste mais importante para a semantica atual verifica que a criacao de shipment inclui o registro do evento `SHIPMENT_CREATED` no mesmo fluxo do use case.
 
-Ainda faltam testes de:
+Acoes de integracao com PostgreSQL ainda sao pendentes para validar com banco real:
 
-- repositories SQLAlchemy;
-- commit e rollback;
-- migration contra banco;
-- persistencia e leitura de eventos;
-- falhas de constraint;
-- concorrencia.
+- commit e rollback em fluxo de request;
+- persistencia real de shipment e eventos;
+- violacao de constraint;
+- concorrencia;
+- integracao de endpoints com banco.
 
-## 8. Funcionalidades planejadas
+## 13. Funcionalidades planejadas
 
 Ainda nao estao implementados:
 
@@ -250,53 +376,17 @@ Ainda nao estao implementados:
 - producer, consumer e workers;
 - retries e dead-letter queue;
 - Redis;
-- idempotencia completa;
-- tratamento de eventos fora de ordem;
+- idempotencia completa concorrente;
+- politica formal de eventos fora de ordem;
 - Transactional Outbox;
 - logging estruturado;
 - metricas Prometheus;
-- dashboards Grafana;
-- health check HTTP.
+- dashboards Grafana.
 
 Esses itens continuam sendo evolucoes futuras e nao representam capacidades atuais do sistema.
 
-## 9. Validacao atual
+## 14. Resumo
 
-A validacao do estado atual apresentou:
+O dominio e os contratos principais da aplicacao estao implementados e consistentes com a estrutura atual do codigo. A API expõe o contrato real de criacao, consulta e processamento de eventos, e a operacao de criacao de Shipment agora inclui o registro do evento `SHIPMENT_CREATED` dentro do mesmo `CreateShipment`.
 
-- `pytest -q`: falha durante a coleta dos testes de API porque `starlette.testclient` exige o pacote `httpx2`, que nao esta em `requirements.txt`;
-- importar `app.api.application` falha durante o registro das rotas, pois a dependencia `get_db` usa `Session` sem ser declarada com `Depends`, fazendo o FastAPI tentar trata-la como campo de resposta;
-- o teste de API espera `GET /health`, mas essa rota nao existe;
-- os testes de schemas da API estao presentes;
-- os testes de dominio, aplicacao e mapper existiam e estavam verdes antes da introducao da camada API;
-- `alembic upgrade head` ja aplicou a migration de localizacao com sucesso no PostgreSQL.
-
-Neste momento, a aplicacao FastAPI nao pode ser importada ou testada de ponta a ponta. A camada de persistencia ainda precisa de testes de integracao.
-
-## 10. Diferencas e problemas arquiteturais atuais
-
-1. A API foi adicionada ao codigo, mas o contexto anterior ainda a descrevia como planejada.
-2. `get_receive_shipment_event_use_case` instancia `ReceiveShipmentEvent` sem fornecer o `event_handler` obrigatorio.
-3. `get_db` e usado como dependencia indireta sem `Depends(get_db)` nas funcoes de factory; isso quebra a montagem das rotas no FastAPI.
-4. A rota `POST /shipments` passa o schema Pydantic diretamente ao caso de uso, embora o caso de uso espere `CreateShipmentInput`. Hoje os atributos possuem nomes compativeis, mas o limite entre API e Application nao esta explicito.
-5. A rota `POST /events` passa `request.payload` como dict. O handler agora normaliza payload de localizacao, mas outros tipos de payload ainda nao possuem schemas especificos.
-6. Nao existe commit ou rollback explicito depois das operacoes HTTP. Mesmo com a dependencia corrigida, a API nao garante persistencia efetiva sem um responsavel transacional.
-7. O teste de health expressa um contrato que nao esta implementado.
-8. `httpx2` nao esta declarado nas dependencias, impedindo a coleta do teste com `TestClient` neste ambiente.
-
-## 11. Proximos passos
-
-1. Corrigir a montagem das dependencias FastAPI, incluindo `Depends(get_db)` e a injecao de `ShipmentEventHandler`.
-2. Decidir se `/health` faz parte do contrato atual; se sim, implementar a rota e seu teste.
-3. Adicionar a dependencia de teste compativel com a versao instalada do Starlette ou ajustar a estrategia de testes HTTP.
-4. Criar conversoes explicitas entre schemas HTTP e inputs da Application Layer.
-5. Definir o responsavel por `commit` e `rollback` nas requisicoes.
-6. Introduzir Unit of Work quando for necessario garantir atomicidade entre shipment e evento.
-7. Criar testes de integracao dos endpoints e repositories com PostgreSQL.
-8. Definir schemas e validacao de payload por tipo de evento.
-9. Definir e implementar idempotencia antes de adotar mensageria.
-10. Implementar RabbitMQ, consumers, retries, DLQ e Outbox em fases separadas.
-
-## 12. Resumo
-
-O dominio e os contratos principais da aplicacao estao implementados. A camada FastAPI foi adicionada com rotas, schemas e dependencias, mas ainda esta quebrada na inicializacao por problemas de injecao de dependencias e possui um teste de health sem rota correspondente. O projeto esta no meio da Fase 2: a API existe estruturalmente, porem ainda precisa ser corrigida e integrada de forma operacional antes de ser considerada concluida.
+A transacao atual e tratada na infraestrutura de sessao por request (`get_db()`), que executa `commit` em caso de sucesso e `rollback` em caso de excecao. Essa fronteira e a responsavel por manter `Shipment` e `SHIPMENT_CREATED` consistentes no mesmo ciclo transacional. O restante da arquitetura continua alinhado com a separacao entre dominio, aplicacao, persistencia e API, sem mover regras de negocio para controllers ou repositories.

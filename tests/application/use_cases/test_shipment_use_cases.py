@@ -42,8 +42,9 @@ class InMemoryShipmentEventRepository:
 
 
 def test_create_shipment_generates_identity_and_timestamps() -> None:
-    repository = InMemoryShipmentRepository()
-    use_case = CreateShipment(repository)
+    shipment_repository = InMemoryShipmentRepository()
+    shipment_event_repository = InMemoryShipmentEventRepository()
+    use_case = CreateShipment(shipment_repository, shipment_event_repository)
 
     shipment = use_case.execute(
         CreateShipmentInput(
@@ -54,7 +55,7 @@ def test_create_shipment_generates_identity_and_timestamps() -> None:
         )
     )
 
-    assert shipment.id in repository.items
+    assert shipment.id in shipment_repository.items
     assert shipment.status.value == "CREATED"
     assert shipment.created_at.tzinfo == UTC
     assert shipment.updated_at == shipment.created_at
