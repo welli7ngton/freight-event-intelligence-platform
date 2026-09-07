@@ -4,6 +4,7 @@ from app.domain.shipment.events import (
     ShipmentEvent,
     ShipmentEventType,
 )
+from app.domain.shipment.exceptions import InvalidShipmentEvent
 
 
 class ShipmentEventHandler:
@@ -15,8 +16,12 @@ class ShipmentEventHandler:
         if event.shipment_id != shipment.id:
             raise ValueError("Event shipment_id does not match the target shipment id.")
 
+        if event.event_type == ShipmentEventType.SHIPMENT_CREATED:
+            raise InvalidShipmentEvent(event.event_type.value)
+
         if event.event_type == ShipmentEventType.LOCATION_UPDATED:
             payload = event.payload
+
             if isinstance(payload, dict):
                 try:
                     payload = LocationUpdatedPayload(**payload)

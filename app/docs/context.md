@@ -1,14 +1,14 @@
-# Contexto tecnico atual: Freight Event Intelligence Platform
+# Current Technical Context: Freight Event Intelligence Platform
 
 > Este documento descreve o estado real do codigo no repositorio. Funcionalidades futuras sao identificadas explicitamente como planejadas.
 
-## 1. Etapa atual
+## 1. Current phase
 
 O projeto esta na **Fase 2 - API/Persistence, em andamento**.
 
 A Fase 1 foi implementada com entidade `Shipment`, eventos imutaveis, state machine, handler, excecoes de dominio e testes unitarios.
 
-A Fase 2 possui contratos de aplicacao, casos de uso, uma camada FastAPI parcial, SQLAlchemy, PostgreSQL, repositories, mapper e Alembic. A API ja possui rotas e schemas, mas ainda nao esta operacional porque a montagem das dependencias FastAPI falha durante a importacao da aplicacao.
+A Fase 2 possui contratos de aplicacao, casos de uso, uma camada FastAPI funcional, SQLAlchemy, PostgreSQL, repositories, mapper e Alembic. A API ja possui rotas e schemas e a aplicacao FastAPI importa corretamente em ambiente local. A parte de integracao com PostgreSQL real continua pendente, mas a camada API e de aplicacao esta operacional no codigo atual.
 
 ## 2. Estrutura real
 
@@ -153,7 +153,7 @@ O handler nao persiste, nao faz commit, nao deduplica e nao reprocessa eventos a
 - `CreateShipment` gera UUID e timestamp UTC, cria a entidade `Shipment`, cria o evento `SHIPMENT_CREATED` e persiste tanto a shipment quanto o evento no mesmo fluxo de aplicacao.
 - `GetShipment` consulta uma shipment pelo ID.
 - `GetShipmentEvents` lista eventos de uma shipment.
-- `ReceiveShipmentEvent` busca a shipment, processa o evento pelo handler e salva o evento e a shipment atualizada.
+- `ReceiveShipmentEvent` rejeita `SHIPMENT_CREATED`, busca a shipment, verifica duplicidade por `event_id`, processa o evento pelo handler e salva o evento e a shipment atualizada.
 
 Os casos de uso possuem testes com repositories em memoria para validar os contratos principais. O teste de criacao agora verifica que a `Shipment` e o evento `SHIPMENT_CREATED` sao gerados e persistidos no mesmo caso de uso.
 
@@ -188,6 +188,11 @@ Schemas implementados:
 - `ShipmentEventResponse`.
 
 Os testes de API validam `GET /health`, criacao de shipment, consulta de shipment, consulta de eventos e envio de eventos do lifecycle. O contrato atual reconhece que a criacao de shipment e a criacao do evento `SHIPMENT_CREATED` sao uma mesma operacao de negocio.
+
+`POST /events` nao aceita `SHIPMENT_CREATED`. O use case e o handler rejeitam
+esse tipo com `InvalidShipmentEvent`, e a rota traduz a excecao para HTTP 422.
+Nao existe teste HTTP especifico para esse status; a rejeicao esta coberta nos
+testes do use case e do handler.
 
 ## 6. Atomicidade atual da criacao de Shipment
 
@@ -358,7 +363,11 @@ Os testes presentes no repositorio confirmam o contrato atual de criacao e proce
 - testes de dominio validam `Shipment`, `ShipmentEvent` e `ShipmentStateMachine`;
 - testes de aplicacao validam `CreateShipment` e `ReceiveShipmentEvent` com repositories em memoria;
 - testes de API validam health, criacao de shipment, consulta de shipment, consulta de eventos e recebimento de evento do lifecycle;
+- o teste de infraestrutura verifica rollback quando a persistencia do evento de criacao falha;
+- os testes de aplicacao verificam a rejeicao de `SHIPMENT_CREATED` no use case e no handler;
 - o teste mais importante para a semantica atual verifica que a criacao de shipment inclui o registro do evento `SHIPMENT_CREATED` no mesmo fluxo do use case.
+
+Validacao atual do repositorio: a suite completa executa com sucesso em ambiente local (`37 passed` em pytest), confirmando que a aplicacao FastAPI e os contratos principais estao funcionando no estado atual do codigo. Houve uma advertencia de deprecacao do Starlette/AnyIO, sem falha de teste.
 
 Acoes de integracao com PostgreSQL ainda sao pendentes para validar com banco real:
 
@@ -387,6 +396,6 @@ Esses itens continuam sendo evolucoes futuras e nao representam capacidades atua
 
 ## 14. Resumo
 
-O dominio e os contratos principais da aplicacao estao implementados e consistentes com a estrutura atual do codigo. A API expõe o contrato real de criacao, consulta e processamento de eventos, e a operacao de criacao de Shipment agora inclui o registro do evento `SHIPMENT_CREATED` dentro do mesmo `CreateShipment`.
+O dominio e os contratos principais da aplicacao estao implementados e consistentes com a estrutura atual do codigo. A API expõe o contrato real de criacao, consulta e processamento de eventos, e a operacao de criacao de Shipment agora inclui o registro do evento `SHIPMENT_CREATED` dentro do mesmo `CreateShipment`. A aplicacao foi validada em contexto de teste e importa corretamente, sem erros de montagem da FastAPI no estado atual do repositorio.
 
 A transacao atual e tratada na infraestrutura de sessao por request (`get_db()`), que executa `commit` em caso de sucesso e `rollback` em caso de excecao. Essa fronteira e a responsavel por manter `Shipment` e `SHIPMENT_CREATED` consistentes no mesmo ciclo transacional. O restante da arquitetura continua alinhado com a separacao entre dominio, aplicacao, persistencia e API, sem mover regras de negocio para controllers ou repositories.

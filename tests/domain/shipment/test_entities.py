@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from app.domain.shipment.entities import Shipment
 from app.domain.shipment.event_handler import ShipmentEventHandler
 from app.domain.shipment.events import (
     ShipmentEvent,
@@ -10,55 +9,20 @@ from app.domain.shipment.events import (
 )
 from app.domain.shipment.exceptions import InvalidStateTransition
 from app.domain.shipment.state_machine import ShipmentStatus
+from tests.factories.shipment import make_event
 
 
-def make_shipment() -> Shipment:
-    now = datetime.now(UTC)
-
-    return Shipment.create(
-        id=uuid4(),
-        reference_number="SHIP-001",
-        origin="Fortaleza",
-        destination="São Paulo",
-        carrier="Carrier A",
-        created_at=now,
-    )
-
-
-def make_event(
-    shipment: Shipment,
-    event_type: ShipmentEventType,
-    occurred_at: datetime,
-) -> ShipmentEvent:
-    return ShipmentEvent(
-        event_id=uuid4(),
-        shipment_id=shipment.id,
-        event_type=event_type,
-        source="test",
-        occurred_at=occurred_at,
-        received_at=occurred_at,
-        payload={},
-    )
-
-
-def get_event_handler() -> ShipmentEventHandler:
-    return ShipmentEventHandler()
-
-
-def test_shipment_starts_in_created_state() -> None:
-    shipment = make_shipment()
-
+def test_shipment_starts_in_created_state(shipment) -> None:
     assert shipment.status == ShipmentStatus.CREATED
 
 
-def test_shipment_can_transition_to_scheduled() -> None:
-    shipment = make_shipment()
+def test_shipment_can_transition_to_scheduled(shipment) -> None:
     occurred_at = datetime.now(UTC)
 
     event = make_event(
-        shipment,
-        ShipmentEventType.PICKUP_SCHEDULED,
-        occurred_at,
+        shipment=shipment,
+        event_type=ShipmentEventType.PICKUP_SCHEDULED,
+        occurred_at=occurred_at,
     )
 
     shipment.change_status(
@@ -70,14 +34,13 @@ def test_shipment_can_transition_to_scheduled() -> None:
     assert shipment.updated_at == occurred_at
 
 
-def test_shipment_rejects_invalid_transition() -> None:
-    shipment = make_shipment()
+def test_shipment_rejects_invalid_transition(shipment) -> None:
     occurred_at = datetime.now(UTC)
 
     event = make_event(
-        shipment,
-        ShipmentEventType.DELIVERED,
-        occurred_at,
+        shipment=shipment,
+        event_type=ShipmentEventType.DELIVERED,
+        occurred_at=occurred_at,
     )
 
     with pytest.raises(InvalidStateTransition):
@@ -89,9 +52,8 @@ def test_shipment_rejects_invalid_transition() -> None:
     assert shipment.status == ShipmentStatus.CREATED
 
 
-def test_shipment_rejects_event_from_another_shipment() -> None:
-    shipment = make_shipment()
-    handler = get_event_handler()
+def test_shipment_rejects_event_from_another_shipment(shipment) -> None:
+    handler = ShipmentEventHandler()
 
     event = ShipmentEvent(
         event_id=uuid4(),

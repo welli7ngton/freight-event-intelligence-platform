@@ -5,13 +5,11 @@ from uuid import UUID
 
 
 class ShipmentEventType(StrEnum):
-    """Events that advance shipment state or update shipment location.
+    """Events recorded in the shipment lifecycle history.
 
-    Values mean: ``SHIPMENT_CREATED`` starts the lifecycle;
-    ``PICKUP_SCHEDULED`` schedules collection; ``PICKUP_COMPLETED`` confirms
-    collection; ``SHIPMENT_DEPARTED`` starts transit; ``LOCATION_UPDATED``
-    records coordinates; ``DELAY_DETECTED`` marks a delay; and ``DELIVERED``
-    confirms final delivery.
+    ``SHIPMENT_CREATED`` records shipment creation and is not processed
+    as a state transition. Subsequent lifecycle events advance shipment
+    state or update its location.
     """
 
     SHIPMENT_CREATED = "SHIPMENT_CREATED"

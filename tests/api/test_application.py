@@ -1,111 +1,11 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-import pytest
-from fastapi.testclient import TestClient
-
-from app.api.application import app
-from app.api.dependencies import (
-    get_create_shipment_use_case,
-    get_get_shipment_events_use_case,
-    get_get_shipment_use_case,
-    get_receive_shipment_event_use_case,
-)
 from app.application.use_cases.create_shipment import (
     CreateShipment,
-    CreateShipmentInput
+    CreateShipmentInput,
 )
-from app.application.use_cases.get_shipment import GetShipment
-from app.application.use_cases.get_shipment_events import GetShipmentEvents
-from app.application.use_cases.receive_shipment_events import (
-    ReceiveShipmentEvent,
-)
-from app.domain.shipment.entities import Shipment
-from app.domain.shipment.event_handler import ShipmentEventHandler
-from app.domain.shipment.events import (
-    ShipmentEvent,
-    ShipmentEventType
-)
-
-
-class InMemoryShipmentRepository:
-    def __init__(self):
-        self.items: dict = {}
-
-    @property
-    def shipments(self):
-        return self.items
-
-    def save(self, shipment: Shipment) -> None:
-        self.items[shipment.id] = shipment
-
-    def get(self, shipment_id):
-        return self.items.get(shipment_id)
-
-
-class InMemoryShipmentEventRepository:
-    def __init__(self):
-        self.items: list = []
-
-    @property
-    def events(self):
-        return {event.event_id: event for event in self.items}
-
-    def exists(self, event_id) -> bool:
-        return any(event.event_id == event_id for event in self.items)
-
-    def save(self, event: ShipmentEvent) -> None:
-        self.items.append(event)
-
-    def list_by_shipment(self, shipment_id):
-        return sorted(
-            (
-                event
-                for event in self.items
-                if event.shipment_id == shipment_id
-            ),
-            key=lambda event: event.occurred_at,
-        )
-
-
-@pytest.fixture
-def repositories():
-    shipment_repository = InMemoryShipmentRepository()
-    event_repository = InMemoryShipmentEventRepository()
-
-    create_use_case = CreateShipment(shipment_repository, event_repository)
-    get_use_case = GetShipment(shipment_repository)
-    get_events_use_case = GetShipmentEvents(event_repository)
-    receive_event_use_case = ReceiveShipmentEvent(
-        shipment_repository=shipment_repository,
-        shipment_event_repository=event_repository,
-        event_handler=ShipmentEventHandler(),
-    )
-
-    app.dependency_overrides[get_create_shipment_use_case] = (
-        lambda: create_use_case
-    )
-
-    app.dependency_overrides[get_get_shipment_use_case] = (
-        lambda: get_use_case
-    )
-
-    app.dependency_overrides[get_get_shipment_events_use_case] = (
-        lambda: get_events_use_case
-    )
-
-    app.dependency_overrides[get_receive_shipment_event_use_case] = (
-        lambda: receive_event_use_case
-    )
-
-    yield shipment_repository, event_repository
-
-    app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def client(repositories):
-    return TestClient(app)
+from app.domain.shipment.events import ShipmentEventType
 
 
 def test_health_check(client):
@@ -258,9 +158,10 @@ def test_receive_event_for_unknown_shipment_returns_not_found(client):
     assert response.status_code == 404
 
 
-def test_create_shipment_generates_identity_timestamps_and_creation_event() -> None:
-    shipment_repository = InMemoryShipmentRepository()
-    event_repository = InMemoryShipmentEventRepository()
+def test_create_shipment_generates_identity_timestamps_and_creation_event(
+    in_memory_repositories,
+) -> None:
+    shipment_repository, event_repository = in_memory_repositories
 
     use_case = CreateShipment(
         shipment_repository=shipment_repository,

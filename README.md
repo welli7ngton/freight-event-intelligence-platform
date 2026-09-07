@@ -1,104 +1,87 @@
 # Freight Event Intelligence Platform
 
-Backend orientado a eventos para receber e processar eventos do ciclo de vida de
-shipments. O projeto e um Modular Monolith em Python, construido para estudar
-DDD, separacao de camadas, persistencia e evolucao para processamento
-assincrono.
+An event-driven backend for receiving and processing freight-shipment lifecycle
+events. The project is a Python modular monolith used to explore DDD, layered
+architecture, persistence, and a future move toward asynchronous processing.
 
-[![wakatime](https://wakatime.com/badge/user/dcf0e22a-41eb-4c76-9126-337f24d80641/project/9b48f8c6-cbf6-4789-91b2-eae6d28ae2b1.svg)](https://wakatime.com/badge/user/dcf0e22a-41eb-4c76-9126-337f24d80641/project/9b48f8c6-cbf6-4789-91b2-eae6d28ae2b1)
+## Current status
 
-## Estado atual
+The domain, application layer, SQLAlchemy persistence, Alembic migrations, and
+FastAPI API are implemented. Phase 2.5 validated persistence against a real,
+isolated PostgreSQL database. Phase 2.6 reproduced the current concurrent
+idempotency limitation and documented the chosen Phase 3 strategy.
 
-O projeto esta na Fase 2, com o dominio, casos de uso, persistencia SQLAlchemy,
-migrations Alembic e uma API FastAPI inicial implementados.
+Implemented capabilities include:
 
-Ja existem:
+- `Shipment`, immutable `ShipmentEvent`s, lifecycle state machine, and event
+  handler;
+- sequential idempotency by `event_id`;
+- PostgreSQL repositories behind application ports;
+- atomic creation of a shipment and its historical `SHIPMENT_CREATED` event;
+- FastAPI endpoints for shipments and operational events;
+- isolated PostgreSQL integration tests, including constraints, rollback, HTTP
+  flow, and concurrent duplicate-event reproduction.
 
-- entidade `Shipment` e eventos imutaveis;
-- state machine para transicoes de status;
-- validacao de eventos da shipment correta;
-- idempotencia inicial por `event_id`;
-- repositories definidos por ports da Application Layer;
-- PostgreSQL via Docker Compose;
-- API para criar e consultar shipments e receber eventos;
-- testes unitarios de dominio, aplicacao, schemas e mapper;
-- Ruff, pytest e Taskipy centralizados no `pyproject.toml`.
+Not implemented yet: concurrent conflict handling, out-of-order event policy,
+RabbitMQ, workers, retries, DLQ, transactional outbox, and observability.
 
-Ainda nao fazem parte do sistema:
-
-- RabbitMQ e consumers;
-- workers, retries e dead-letter queue;
-- Redis;
-- tratamento completo de eventos fora de ordem;
-- Transactional Outbox;
-- observabilidade com Prometheus e Grafana.
-
-## Arquitetura
+## Architecture
 
 ```text
 app/
-├── api/                  # FastAPI, rotas, schemas e dependencias
-├── application/          # ports e casos de uso
-├── domain/               # entidades, eventos e regras de negocio
-├── infra/database/       # SQLAlchemy, repositories, mappers e sessao
-└── workers/              # reservado para processamento assincrono
+├── api/                  # FastAPI routes, schemas, and dependencies
+├── application/          # Use cases and repository ports
+├── domain/               # Entities, events, and business rules
+├── infra/database/       # SQLAlchemy models, mappers, repositories, session
+└── workers/              # Reserved for future asynchronous processing
 
-alembic/                  # migrations do banco
-tests/                    # testes por camada
+alembic/                  # Database migrations
+tests/                    # Unit and integration tests
 ```
 
-O dominio nao depende de FastAPI, SQLAlchemy ou PostgreSQL. A Application Layer
-orquestra os casos de uso por meio de contratos, enquanto a infraestrutura
-implementa esses contratos.
+The domain does not depend on FastAPI, SQLAlchemy, or PostgreSQL. The
+application layer orchestrates use cases through ports; infrastructure provides
+their implementations.
 
-## Requisitos
+## Requirements
 
-- Python 3.12 ou superior;
-- Docker Desktop com Docker Compose;
-- PostgreSQL local ou o servico PostgreSQL fornecido pelo Compose.
+- Python 3.12 or later
+- Docker Desktop with Docker Compose
+- PostgreSQL, either local or supplied by Compose
 
-## Setup local
+## Local setup
 
-No PowerShell:
+In PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
+Copy-Item .env-example .env
 ```
 
-Suba o PostgreSQL e aplique as migrations:
+Configure `.env` with the credentials and URLs for the target environment. It
+is ignored by Git; `.env-example` documents every required setting without
+containing a usable secret.
+
+Start PostgreSQL and apply migrations:
 
 ```powershell
 task setup
 ```
 
-O banco local usa estes valores padrao:
+`DATABASE_URL` is used by the API and Alembic. PostgreSQL container credentials
+and the isolated test database URL are also configured through `.env`. Use a
+different `.env` per environment, supplied by that environment's secrets
+mechanism in staging and production.
 
-```text
-Host: localhost
-Port: 5432
-Database: freight_events
-User: postgres
-Password: postgres
-```
-
-Para usar outra conexao, defina `DATABASE_URL` antes de executar a API ou as
-migrations:
-
-```powershell
-$env:DATABASE_URL = "postgresql+psycopg://usuario:senha@host:5432/banco"
-```
-
-## Executar a API
+## Run the API
 
 ```powershell
 task api
 ```
 
-A API fica disponivel em `http://127.0.0.1:8000`.
-
-Documentacao interativa:
+The API is available at `http://127.0.0.1:8000`.
 
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - ReDoc: `http://127.0.0.1:8000/redoc`
@@ -106,7 +89,7 @@ Documentacao interativa:
 
 ## Endpoints
 
-### Criar shipment
+### Create a shipment
 
 ```http
 POST /shipments
@@ -122,23 +105,28 @@ Content-Type: application/json
 }
 ```
 
-### Consultar shipment
+`POST /shipments` is the only public creation API. `CreateShipment` creates a
+shipment in `CREATED` and records a `SHIPMENT_CREATED` event with
+`source = platform` in the same SQLAlchemy session. Repositories do not commit;
+`get_db()` commits at the end of a successful request and rolls back on error.
+
+### Get a shipment
 
 ```http
 GET /shipments/{shipment_id}
 ```
 
-Retorna `404` quando a shipment nao existe.
+Returns `404` when the shipment does not exist.
 
-### Consultar eventos
+### Get shipment events
 
 ```http
 GET /shipments/{shipment_id}/events
 ```
 
-Os eventos sao retornados ordenados por `occurred_at`.
+Returns the event history ordered by `occurred_at`.
 
-### Receber evento
+### Receive an event
 
 ```http
 POST /events
@@ -156,18 +144,13 @@ Content-Type: application/json
 }
 ```
 
-Para `LOCATION_UPDATED`, o payload deve conter latitude e longitude numericas:
+This endpoint accepts operational lifecycle events for an existing shipment.
+`SHIPMENT_CREATED` is rejected with `422`; it is historical creation metadata,
+not a state-machine transition. `LOCATION_UPDATED` requires numeric `latitude`
+and `longitude` values in `payload`. Invalid transitions return `409`; an
+unknown shipment returns `404`.
 
-```json
-{
-  "latitude": -3.7319,
-  "longitude": -38.5267
-}
-```
-
-Transicoes invalidas retornam `409`. Shipment inexistente retorna `404`.
-
-## Estados da shipment
+## Shipment states
 
 ```text
 CREATED --PICKUP_SCHEDULED--> SCHEDULED
@@ -179,61 +162,71 @@ DELAYED --SHIPMENT_DEPARTED--> IN_TRANSIT
 DELAYED --DELIVERED--> DELIVERED
 ```
 
-O dominio usa `occurred_at` para atualizar `updated_at` quando um evento altera
-o estado ou a localizacao. `received_at` registra quando o sistema recebeu o
-evento.
+The domain uses `occurred_at` to update `updated_at` when an event changes
+state or location. `received_at` records when the platform received the event.
 
-## Testes e qualidade
+## Tests and quality
 
 ```powershell
-task test-fast       # testes em modo resumido
-task test            # testes completos
-task test-api        # testes da camada API
-task lint            # Ruff lint
-task lint-fix        # corrige lint automaticamente
-task format          # formata com Ruff
-task format-check    # verifica formatacao
-task check           # formatacao, lint e testes
-task compile         # compila app e testes
+task test-fast          # concise unit-test output
+task test               # default suite; integration tests are excluded
+task test-api           # API-layer tests
+task test-integration   # isolated PostgreSQL integration tests
+task lint               # Ruff lint
+task lint-fix           # apply Ruff lint fixes
+task format             # format with Ruff
+task format-check       # check formatting
+task check              # formatting, lint, and tests
+task compile            # compile app and tests
 ```
 
-O comando recomendado antes de abrir uma alteracao e:
+Run the following before submitting a change:
 
 ```powershell
 task check
 ```
 
-## Banco e migrations
+### Integration tests
+
+Integration tests exclusively use `freight_events_test` in the `postgres-test`
+service on port `5433`; they never use the development database. Start the
+service and run the tests as follows:
 
 ```powershell
-task db-up          # inicia PostgreSQL
-task db-down        # para os servicos
-task db-logs        # acompanha os logs
-task db-migrate     # aplica migrations
-task db-current     # mostra a revision atual
-task db-history     # mostra o historico
-task db-rollback    # desfaz a ultima migration
+docker compose up -d postgres-test
+task test-integration
 ```
 
-Para criar uma migration autogerada:
+Set `TEST_DATABASE_URL` to use another test URL. For safety, it must point to a
+database named exactly `freight_events_test`.
+
+## Database and migrations
 
 ```powershell
-task db-revision -- "descricao da alteracao"
+task db-up          # start PostgreSQL
+task db-down        # stop services
+task db-logs        # follow PostgreSQL logs
+task db-migrate     # apply migrations
+task db-rollback    # roll back one migration
+task db-current     # show current revision
+task db-history     # show migration history
+task db-revision -- "description" # create an autogenerated migration
 ```
 
-Revise sempre uma migration autogerada antes de aplica-la.
+Always review autogenerated migrations before applying them.
 
-## Decisoes e documentacao
+## Decisions and documentation
 
-As decisoes arquiteturais ficam em [app/docs/adr](app/docs/adr):
+Architecture decisions are recorded in [app/docs/adr](app/docs/adr):
 
-- [ADR-001 - Core Domain e State Machine da Shipment](app/docs/adr/001-Core-Domain-e-State%20Machine-da-Shipment.md)
-- [ADR-002 - Evolucao da Fase 2: API e Persistencia](app/docs/adr/002-Evolucao-da-Fase-2-API-e-Persistencia.md)
+- [ADR-001 — Shipment Core Domain and State Machine](app/docs/adr/001-Shipment-Core-Domain-and-State-Machine.md)
+- [ADR-002 — Phase 2 API and Persistence Evolution](app/docs/adr/002-Phase-2-API-and-Persistence-Evolution.md)
+- [ADR-003 — Atomic Shipment and SHIPMENT_CREATED Persistence](app/docs/adr/003-Atomic-Shipment-and-SHIPMENT_CREATED-Persistence.md)
+- [ADR-004 — Concurrent Idempotency Strategy](app/docs/adr/004-Concurrent-Idempotency-Strategy.md)
 
-## Proximos passos
+## Next steps
 
-1. Adicionar testes de integracao dos repositories e endpoints com PostgreSQL.
-2. Definir uma Unit of Work quando a atomicidade exigir mais do que o ciclo atual da sessao.
-3. Fortalecer idempotencia contra concorrencia.
-4. Definir a politica de eventos fora de ordem.
-5. Introduzir RabbitMQ, workers, retries, DLQ e Outbox em fases separadas.
+1. Implement Phase 3A: turn a concurrent unique-constraint conflict into a
+   defined idempotent API outcome.
+2. Define and implement the out-of-order-event policy.
+3. Add RabbitMQ, workers, retries, DLQ, and Outbox in separate phases.

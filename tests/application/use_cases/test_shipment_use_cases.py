@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
 
+import pytest
 from app.application.use_cases.create_shipment import (
     CreateShipment,
     CreateShipmentInput,
@@ -8,42 +8,17 @@ from app.application.use_cases.create_shipment import (
 from app.application.use_cases.receive_shipment_events import (
     ReceiveShipmentEvent,
 )
-from app.domain.shipment.entities import Shipment
 from app.domain.shipment.event_handler import ShipmentEventHandler
-from app.domain.shipment.events import ShipmentEvent, ShipmentEventType
+from app.domain.shipment.events import ShipmentEventType
+from app.domain.shipment.exceptions import InvalidShipmentEvent
+from app.domain.shipment.state_machine import ShipmentStatus
+from tests.factories.shipment import make_event, make_shipment
 
 
-class InMemoryShipmentRepository:
-    def __init__(self) -> None:
-        self.items: dict[UUID, Shipment] = {}
-
-    def get(self, shipment_id: UUID) -> Shipment | None:
-        return self.items.get(shipment_id)
-
-    def save(self, shipment: Shipment) -> None:
-        self.items[shipment.id] = shipment
-
-
-class InMemoryShipmentEventRepository:
-    def __init__(self) -> None:
-        self.items: list[ShipmentEvent] = []
-
-    def save(self, event: ShipmentEvent) -> None:
-        self.items.append(event)
-
-    def exists(self, event_id: UUID) -> bool:
-        return any(event.event_id == event_id for event in self.items)
-
-    def list_by_shipment(
-        self,
-        shipment_id: UUID,
-    ) -> list[ShipmentEvent]:
-        return [event for event in self.items if event.shipment_id == shipment_id]
-
-
-def test_create_shipment_generates_identity_and_timestamps() -> None:
-    shipment_repository = InMemoryShipmentRepository()
-    shipment_event_repository = InMemoryShipmentEventRepository()
+def test_create_shipment_generates_identity_and_timestamps(
+    in_memory_repositories,
+) -> None:
+    shipment_repository, shipment_event_repository = in_memory_repositories
     use_case = CreateShipment(shipment_repository, shipment_event_repository)
 
     shipment = use_case.execute(
@@ -61,28 +36,14 @@ def test_create_shipment_generates_identity_and_timestamps() -> None:
     assert shipment.updated_at == shipment.created_at
 
 
-def test_receive_shipment_event_updates_and_persists_shipment() -> None:
-    shipment_repository = InMemoryShipmentRepository()
-    event_repository = InMemoryShipmentEventRepository()
-    shipment = Shipment.create(
-        id=uuid4(),
-        reference_number="SHIP-001",
-        origin="Fortaleza",
-        destination="Sao Paulo",
-        carrier="Carrier A",
-        created_at=datetime.now(UTC),
-    )
+def test_receive_shipment_event_updates_and_persists_shipment(
+    in_memory_repositories,
+) -> None:
+    shipment_repository, event_repository = in_memory_repositories
+    shipment = make_shipment()
     shipment_repository.save(shipment)
     occurred_at = datetime.now(UTC)
-    event = ShipmentEvent(
-        event_id=uuid4(),
-        shipment_id=shipment.id,
-        event_type=ShipmentEventType.PICKUP_SCHEDULED,
-        source="test",
-        occurred_at=occurred_at,
-        received_at=datetime.now(UTC),
-        payload={},
-    )
+    event = make_event(shipment=shipment, occurred_at=occurred_at)
 
     result = ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
@@ -96,27 +57,11 @@ def test_receive_shipment_event_updates_and_persists_shipment() -> None:
     assert shipment_repository.get(shipment.id) is result
 
 
-def test_receive_shipment_event_is_idempotent() -> None:
-    shipment_repository = InMemoryShipmentRepository()
-    event_repository = InMemoryShipmentEventRepository()
-    shipment = Shipment.create(
-        id=uuid4(),
-        reference_number="SHIP-001",
-        origin="Fortaleza",
-        destination="Sao Paulo",
-        carrier="Carrier A",
-        created_at=datetime.now(UTC),
-    )
+def test_receive_shipment_event_is_idempotent(in_memory_repositories) -> None:
+    shipment_repository, event_repository = in_memory_repositories
+    shipment = make_shipment()
     shipment_repository.save(shipment)
-    event = ShipmentEvent(
-        event_id=uuid4(),
-        shipment_id=shipment.id,
-        event_type=ShipmentEventType.PICKUP_SCHEDULED,
-        source="test",
-        occurred_at=datetime.now(UTC),
-        received_at=datetime.now(UTC),
-        payload={},
-    )
+    event = make_event(shipment=shipment)
     use_case = ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
@@ -129,3 +74,71 @@ def test_receive_shipment_event_is_idempotent() -> None:
     assert first_result.status.value == "SCHEDULED"
     assert second_result.status.value == "SCHEDULED"
     assert event_repository.items == [event]
+
+
+def test_receive_shipment_created_event_is_rejected_before_processing(
+    in_memory_repositories,
+) -> None:
+    shipment = make_shipment()
+    shipment_repository, event_repository = in_memory_repositories
+    handler = ShipmentEventHandler()
+
+    use_case = ReceiveShipmentEvent(
+        shipment_repository=shipment_repository,
+        shipment_event_repository=event_repository,
+        event_handler=handler,
+    )
+
+    event = make_event(
+        shipment=shipment,
+        event_type=ShipmentEventType.SHIPMENT_CREATED,
+    )
+
+    with pytest.raises(InvalidShipmentEvent):
+        use_case.execute(event)
+
+    assert shipment.status == ShipmentStatus.CREATED
+    assert event_repository.items == []
+
+
+def test_event_handler_rejects_shipment_created_as_a_state_transition():
+    shipment = make_shipment()
+    event = make_event(
+        shipment=shipment,
+        event_type=ShipmentEventType.SHIPMENT_CREATED,
+    )
+
+    with pytest.raises(InvalidShipmentEvent):
+        ShipmentEventHandler().handle(shipment, event)
+
+    assert shipment.status == ShipmentStatus.CREATED
+
+
+def test_create_shipment_persists_shipment_and_creation_event(
+    in_memory_repositories,
+) -> None:
+    shipment_repository, event_repository = in_memory_repositories
+    use_case = CreateShipment(
+        shipment_repository=shipment_repository,
+        shipment_event_repository=event_repository,
+    )
+
+    shipment = use_case.execute(
+        CreateShipmentInput(
+            reference_number="REF-001",
+            origin="Fortaleza",
+            destination="Recife",
+            carrier="Carrier A",
+        )
+    )
+
+    assert shipment.status == ShipmentStatus.CREATED
+    assert shipment_repository.get(shipment.id) == shipment
+    assert len(event_repository.items) == 1
+
+    event = event_repository.items[0]
+
+    assert event.event_type == ShipmentEventType.SHIPMENT_CREATED
+    assert event.shipment_id == shipment.id
+    assert event.occurred_at == shipment.created_at
+    assert event.received_at >= event.occurred_at

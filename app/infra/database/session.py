@@ -1,16 +1,9 @@
-import os
-
+from app.infra.config import get_database_url
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg://postgres:postgres@localhost:5432/freight_events",
-)
-
-
 engine = create_engine(
-    DATABASE_URL,
+    get_database_url(),
     pool_pre_ping=True,
 )
 

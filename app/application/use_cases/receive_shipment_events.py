@@ -6,7 +6,8 @@ from app.application.ports.shipment_repository import (
 )
 from app.domain.shipment.entities import Shipment
 from app.domain.shipment.event_handler import ShipmentEventHandler
-from app.domain.shipment.events import ShipmentEvent
+from app.domain.shipment.events import ShipmentEvent, ShipmentEventType
+from app.domain.shipment.exceptions import InvalidShipmentEvent
 
 
 class ReceiveShipmentEvent:
@@ -24,6 +25,9 @@ class ReceiveShipmentEvent:
         self,
         event: ShipmentEvent,
     ) -> Shipment:
+        if event.event_type == ShipmentEventType.SHIPMENT_CREATED:
+            raise InvalidShipmentEvent(event.event_type.value)
+
         shipment = self._shipment_repository.get(event.shipment_id)
 
         if shipment is None:
@@ -38,7 +42,6 @@ class ReceiveShipmentEvent:
         )
 
         self._shipment_event_repository.save(event)
-
         self._shipment_repository.save(shipment)
 
         return shipment

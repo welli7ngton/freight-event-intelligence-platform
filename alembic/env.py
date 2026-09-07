@@ -1,8 +1,8 @@
-import os
 from logging.config import fileConfig
 
 from alembic import context
 from app.infra.database.base import Base
+from app.infra.config import get_database_url
 from app.infra.database.models import ShipmentEventModel, ShipmentModel
 from sqlalchemy import engine_from_config, pool
 
@@ -14,14 +14,6 @@ if config.config_file_name is not None:
 
 
 target_metadata = Base.metadata
-
-
-def get_database_url() -> str:
-    return os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://postgres:postgres@localhost:5432/freight_events",
-    )
-
 
 def run_migrations_offline() -> None:
     url = get_database_url()

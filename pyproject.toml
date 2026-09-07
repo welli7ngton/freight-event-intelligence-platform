@@ -13,6 +13,7 @@ dependencies = [
     "fastapi==0.141.1",
     "psycopg[binary]==3.3.5",
     "pydantic==2.13.5",
+    "python-dotenv==1.2.3",
     "SQLAlchemy==2.0.52",
     "uvicorn[standard]==0.52.4",
 ]
@@ -35,7 +36,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-vv --strict-markers"
+addopts = "-vv --strict-markers -m 'not integration'"
+markers = [
+    "integration: tests that require the isolated PostgreSQL test database",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -59,6 +63,7 @@ line-ending = "auto"
 test = "python -m pytest"
 test-fast = "python -m pytest -q"
 test-api = "python -m pytest tests/api"
+test-integration = "python -m pytest -m integration"
 lint = "ruff check ."
 lint-fix = "ruff check . --fix"
 format = "ruff format ."

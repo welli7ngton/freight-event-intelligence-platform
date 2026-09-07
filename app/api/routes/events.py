@@ -8,7 +8,10 @@ from app.application.use_cases.receive_shipment_events import (
     ReceiveShipmentEvent,
 )
 from app.domain.shipment.events import ShipmentEvent
-from app.domain.shipment.exceptions import InvalidStateTransition
+from app.domain.shipment.exceptions import (
+    InvalidShipmentEvent,
+    InvalidStateTransition,
+)
 from fastapi import APIRouter, Depends, HTTPException, status
 
 router = APIRouter(
@@ -65,5 +68,10 @@ def receive_event(
     except InvalidStateTransition as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except InvalidShipmentEvent as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(error),
         ) from error

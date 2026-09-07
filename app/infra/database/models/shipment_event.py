@@ -2,9 +2,12 @@ from datetime import datetime
 from uuid import UUID
 
 from app.infra.database.base import Base
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import JSON, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+
+# Uses JSONB on Postgres and act as fallback for JSON on SQLite
+JSONType = JSONB().with_variant(JSON, "sqlite")
 
 
 class ShipmentEventModel(Base):
@@ -43,6 +46,6 @@ class ShipmentEventModel(Base):
     )
 
     payload: Mapped[dict] = mapped_column(
-        JSONB,
+        JSONType,
         nullable=False,
     )
