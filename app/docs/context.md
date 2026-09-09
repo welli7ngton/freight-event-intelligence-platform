@@ -68,7 +68,7 @@ tests/
 └── infra/database/test_shipment_mapper.py
 ```
 
-O diretorio `api` possui uma aplicacao FastAPI, rotas, schemas Pydantic e dependencias de banco. O diretorio `workers` ainda contem apenas inicializacao e nao possui consumers, producers ou workers funcionais.
+O diretorio `api` possui uma aplicacao FastAPI, rotas, schemas Pydantic e dependencias de banco. O diretorio `workers` possui o worker RabbitMQ, que converte a mensagem versionada e reutiliza `ReceiveShipmentEvent`; ele nao possui regras de dominio.
 
 ## 3. Dominio implementado
 
@@ -374,9 +374,6 @@ Acoes de integracao com PostgreSQL ainda sao pendentes para validar com banco re
 
 Ainda nao estao implementados:
 
-- RabbitMQ;
-- producer, consumer e workers;
-- retries e dead-letter queue;
 - Redis;
 - idempotencia completa concorrente;
 - politica formal de eventos fora de ordem;
