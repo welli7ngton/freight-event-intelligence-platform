@@ -19,6 +19,7 @@ def make_shipment(
     current_latitude: float | None = None,
     current_longitude: float | None = None,
     last_location_at: datetime | None = None,
+    last_lifecycle_at: datetime | None = None,
 ) -> Shipment:
     created_at = created_at or datetime.now(UTC)
     updated_at = updated_at or created_at
@@ -35,6 +36,7 @@ def make_shipment(
         current_latitude=current_latitude,
         current_longitude=current_longitude,
         last_location_at=last_location_at,
+        last_lifecycle_at=last_lifecycle_at,
     )
 
 

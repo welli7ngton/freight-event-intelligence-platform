@@ -1,11 +1,15 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.api.application import app
+from app.api.dependencies import get_receive_shipment_event_use_case
 from app.application.use_cases.create_shipment import (
     CreateShipment,
     CreateShipmentInput,
 )
 from app.domain.shipment.events import ShipmentEventType
+from sqlalchemy.exc import IntegrityError
+from tests.factories.shipment import make_shipment
 
 
 def test_health_check(client):
@@ -156,6 +160,48 @@ def test_receive_event_for_unknown_shipment_returns_not_found(client):
     )
 
     assert response.status_code == 404
+
+
+def test_concurrent_duplicate_event_returns_the_persisted_shipment(client):
+    shipment = make_shipment()
+
+    class Diagnostic:
+        constraint_name = "shipment_events_pkey"
+
+    class DuplicateEventError(Exception):
+        diag = Diagnostic()
+
+    class ConflictingUseCase:
+        def execute(self, event):
+            raise IntegrityError("INSERT", {}, DuplicateEventError())
+
+        def get_current_shipment(self, shipment_id):
+            assert shipment_id == shipment.id
+            return shipment
+
+    original_override = app.dependency_overrides[get_receive_shipment_event_use_case]
+    app.dependency_overrides[get_receive_shipment_event_use_case] = (
+        lambda: ConflictingUseCase()
+    )
+    try:
+        response = client.post(
+            "/events",
+            json={
+                "event_id": str(uuid4()),
+                "shipment_id": str(shipment.id),
+                "event_type": "PICKUP_SCHEDULED",
+                "source": "carrier-api",
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "payload": {},
+            },
+        )
+    finally:
+        app.dependency_overrides[get_receive_shipment_event_use_case] = (
+            original_override
+        )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(shipment.id)
 
 
 def test_create_shipment_generates_identity_timestamps_and_creation_event(

@@ -2,6 +2,7 @@ import pytest
 from app.api.application import app
 from app.api.dependencies import (
     get_create_shipment_use_case,
+    get_db,
     get_get_shipment_events_use_case,
     get_get_shipment_use_case,
     get_receive_shipment_event_use_case,
@@ -12,6 +13,14 @@ from app.application.use_cases.get_shipment_events import GetShipmentEvents
 from app.application.use_cases.receive_shipment_events import ReceiveShipmentEvent
 from app.domain.shipment.event_handler import ShipmentEventHandler
 from fastapi.testclient import TestClient
+
+
+class InMemoryTransaction:
+    def flush(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -35,6 +44,7 @@ def repositories(in_memory_repositories):
             event_handler=ShipmentEventHandler(),
         )
     )
+    app.dependency_overrides[get_db] = lambda: InMemoryTransaction()
 
     try:
         yield shipment_repository, event_repository

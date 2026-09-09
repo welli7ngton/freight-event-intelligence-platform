@@ -45,3 +45,4 @@ class SQLAlchemyShipmentRepository(ShipmentRepository):
         existing.current_latitude = model.current_latitude
         existing.current_longitude = model.current_longitude
         existing.last_location_at = model.last_location_at
+        existing.last_lifecycle_at = model.last_lifecycle_at

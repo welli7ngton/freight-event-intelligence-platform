@@ -2,6 +2,7 @@ from app.domain.shipment.entities import Shipment
 from app.domain.shipment.events import (
     LocationUpdatedPayload,
     ShipmentEvent,
+    ShipmentEventProcessingStatus,
     ShipmentEventType,
 )
 from app.domain.shipment.exceptions import InvalidShipmentEvent
@@ -12,7 +13,7 @@ class ShipmentEventHandler:
         self,
         shipment: Shipment,
         event: ShipmentEvent,
-    ) -> None:
+    ) -> ShipmentEventProcessingStatus:
         if event.shipment_id != shipment.id:
             raise ValueError("Event shipment_id does not match the target shipment id.")
 
@@ -35,13 +36,26 @@ class ShipmentEventHandler:
                     "LOCATION_UPDATED events require a LocationUpdatedPayload."
                 )
 
+            if (
+                shipment.last_location_at is not None
+                and event.occurred_at < shipment.last_location_at
+            ):
+                return ShipmentEventProcessingStatus.STORED_OUT_OF_ORDER
+
             shipment.update_location(
                 payload=payload,
                 occurred_at=event.occurred_at,
             )
-            return
+            return ShipmentEventProcessingStatus.APPLIED
+
+        if (
+            shipment.last_lifecycle_at is not None
+            and event.occurred_at < shipment.last_lifecycle_at
+        ):
+            return ShipmentEventProcessingStatus.STORED_OUT_OF_ORDER
 
         shipment.change_status(
             event.event_type,
             event.occurred_at,
         )
+        return ShipmentEventProcessingStatus.APPLIED

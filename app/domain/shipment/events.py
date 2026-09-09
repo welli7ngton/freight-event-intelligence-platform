@@ -21,6 +21,13 @@ class ShipmentEventType(StrEnum):
     DELIVERED = "DELIVERED"
 
 
+class ShipmentEventProcessingStatus(StrEnum):
+    """How an accepted event affected the shipment's current projection."""
+
+    APPLIED = "APPLIED"
+    STORED_OUT_OF_ORDER = "STORED_OUT_OF_ORDER"
+
+
 # A class to hold a specific property to a single event that does not trigger a transition (LOCATION_UPDATED).
 @dataclass(frozen=True, slots=True)
 class LocationUpdatedPayload:
@@ -38,3 +45,6 @@ class ShipmentEvent:
     occurred_at: datetime
     received_at: datetime
     payload: object
+    processing_status: ShipmentEventProcessingStatus = (
+        ShipmentEventProcessingStatus.APPLIED
+    )

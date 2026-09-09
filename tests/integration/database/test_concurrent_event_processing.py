@@ -21,9 +21,9 @@ class BarrierShipmentEventHandler:
         self._barrier = barrier
         self._delegate = ShipmentEventHandler()
 
-    def handle(self, shipment, event: ShipmentEvent) -> None:
+    def handle(self, shipment, event: ShipmentEvent):
         self._barrier.wait(timeout=5)
-        self._delegate.handle(shipment, event)
+        return self._delegate.handle(shipment, event)
 
 
 def test_same_event_processed_concurrently_hits_unique_constraint(

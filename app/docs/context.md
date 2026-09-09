@@ -80,7 +80,7 @@ O diretorio `api` possui uma aplicacao FastAPI, rotas, schemas Pydantic e depend
 
 `change_status(event_type, occurred_at)` aplica a state machine e atualiza `updated_at` com o instante do evento.
 
-`update_location(payload, occurred_at)` atualiza latitude, longitude, `last_location_at` e `updated_at`.
+`update_location(payload, occurred_at)` atualiza latitude, longitude, `last_location_at` e `updated_at`. A shipment tambem preserva `last_lifecycle_at`, separado do tempo da localizacao.
 
 Ainda nao existem na entidade:
 
@@ -341,20 +341,13 @@ Ainda nao existem tabelas `processed_events` ou `outbox_events`.
 
 ## 10. Idempotencia atual e limites conhecidos
 
-O repositorio de eventos define `exists(event_id)` e a implementacao SQLAlchemy verifica a chave primaria antes do processamento. Isso oferece protecao contra processamento repetido em cenarios sequenciais e e usado por `ReceiveShipmentEvent` antes de aplicar a transicao e salvar o evento.
+O repositorio de eventos define `exists(event_id)` e a implementacao SQLAlchemy verifica a chave primaria antes do processamento. Isso oferece protecao contra processamento repetido em cenarios sequenciais e e usado por `ReceiveShipmentEvent` antes de aplicar a transicao e salvar o evento. Para uma corrida concorrente, a constraint primaria de `shipment_events.event_id` e o limite final: a rota faz flush, executa rollback quando a constraint e violada e retorna a shipment persistida como resultado idempotente.
 
-No entanto, essa estrategia e limitada:
-
-- ela protege contra duplicidade simples em memoria ou no banco em um fluxo sequencial;
-- nao substitui uma estrategia robusta de concorrencia em ambientes com multiplos consumidores ou paralelismo;
-- ainda nao existe tabela dedicada `processed_events` nem uma politica completa de deduplicacao por corrida de processos;
-- ainda nao existe uma estrategia formal de idempotencia para eventos recebidos fora de ordem.
-
-A documentacao atual deve tratar isso como uma implementacao inicial e parcialmente defensiva, e nao como idempotencia concorrente completa.
+Essa estrategia nao cria uma tabela dedicada `processed_events` e nao representa estados intermediarios de processamento. Ela e adequada ao fluxo sincrono atual, no qual o evento e a projecao da shipment pertencem a mesma transacao. Efeitos externos futuros continuam exigindo Outbox e consumidores idempotentes.
 
 ## 11. Eventos fora de ordem
 
-A consulta de eventos ordena por `occurred_at`, mas a arquitetura atual nao define uma politica obrigatoria para tratativa de eventos recebidos fora de ordem. A distinção entre `occurred_at` e `received_at` esta preservada como preparacao para evolucao futura, mas a decisao sobre aceitacao, rejeicao, reprocessamento ou arquivamento de eventos atrasados ainda nao foi implementada.
+A plataforma persiste todo evento valido, inclusive os recebidos fora de ordem. O campo `processing_status` em `shipment_events` registra `APPLIED` quando o evento atualiza a projecao corrente ou `STORED_OUT_OF_ORDER` quando permanece apenas no historico. Localizacoes atrasadas nao sobrescrevem uma localizacao mais recente; lifecycle atrasado nao altera o status corrente. Os dois relogios sao independentes (`last_location_at` e `last_lifecycle_at`), portanto uma localizacao mais nova nao bloqueia uma transicao de lifecycle valida. Nao existe replay historico nesta versao; ele podera ser adicionado quando houver necessidade de reconciliacao.
 
 ## 12. Testes e validacao do estado atual
 
@@ -367,7 +360,7 @@ Os testes presentes no repositorio confirmam o contrato atual de criacao e proce
 - os testes de aplicacao verificam a rejeicao de `SHIPMENT_CREATED` no use case e no handler;
 - o teste mais importante para a semantica atual verifica que a criacao de shipment inclui o registro do evento `SHIPMENT_CREATED` no mesmo fluxo do use case.
 
-Validacao atual do repositorio: a suite completa executa com sucesso em ambiente local (`37 passed` em pytest), confirmando que a aplicacao FastAPI e os contratos principais estao funcionando no estado atual do codigo. Houve uma advertencia de deprecacao do Starlette/AnyIO, sem falha de teste.
+Validacao atual do repositorio: a suite unitária e de API executa com sucesso em ambiente local (`41 passed` em pytest, com integracao excluida por padrao), confirmando que a aplicacao FastAPI e os contratos principais estao funcionando no estado atual do codigo. Houve uma advertencia de deprecacao do Starlette/AnyIO, sem falha de teste.
 
 Acoes de integracao com PostgreSQL ainda sao pendentes para validar com banco real:
 

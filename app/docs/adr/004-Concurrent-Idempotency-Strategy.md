@@ -35,11 +35,11 @@ for the concurrent request rather than a contract-defined duplicate response.
 
 ## Decision
 
-In Phase 3A, the platform will retain `shipment_events.event_id` as the unique
-identity and use a **database constraint plus explicit conflict handling** as
-its concurrent-idempotency strategy.
+The platform retains `shipment_events.event_id` as the unique identity and uses
+a **database constraint plus explicit conflict handling** as its
+concurrent-idempotency strategy.
 
-The planned flow is:
+The implemented flow is:
 
 ```text
 Receive event
@@ -53,9 +53,11 @@ Unique-constraint conflict?
       └── yes → rollback, reload shipment, return duplicate outcome
 ```
 
-Conflict handling must occur at the transaction boundary after session rollback,
-not in the domain or repositories. The domain remains responsible only for
-validating and applying transitions to the supplied entity.
+The API transaction boundary flushes the pending work so a concurrent
+unique-constraint collision can be caught before the response is emitted. It
+rolls back, reloads the persisted shipment, and returns that canonical
+projection. The domain remains responsible only for validating and applying
+transitions to the supplied entity.
 
 No `processed_events` table will be created at this stage. The decision will be
 revisited if the system needs intermediate processing states, recoverable
@@ -98,7 +100,7 @@ exist. It is premature before the planned asynchronous processing is added.
 ## Consequences
 
 - PostgreSQL remains the final guarantee of event uniqueness.
-- Phase 3A must add a test that validates the defined concurrent-conflict
-  response in addition to this reproduction test.
+- The API test suite validates the defined concurrent-conflict response in
+  addition to the PostgreSQL race reproduction test.
 - This ADR makes no functional change; it documents the strategy to be
   implemented in the next phase.

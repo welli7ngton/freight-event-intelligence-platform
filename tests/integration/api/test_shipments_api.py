@@ -71,3 +71,49 @@ def test_http_returns_not_found_for_unknown_shipment(client) -> None:
     response = client.get(f"/shipments/{uuid4()}")
 
     assert response.status_code == 404
+
+
+def test_http_retains_late_event_without_regressing_shipment_projection(client) -> None:
+    created = client.post(
+        "/shipments",
+        json={
+            "reference_number": "HTTP-OUT-OF-ORDER-001",
+            "origin": "Fortaleza",
+            "destination": "Recife",
+            "carrier": "Carrier A",
+        },
+    )
+    shipment_id = created.json()["id"]
+    scheduled_event_id = uuid4()
+    late_event_id = uuid4()
+
+    scheduled = client.post(
+        "/events",
+        json={
+            "event_id": str(scheduled_event_id),
+            "shipment_id": shipment_id,
+            "event_type": "PICKUP_SCHEDULED",
+            "source": "carrier_api",
+            "occurred_at": datetime(2026, 9, 7, 12, 0, tzinfo=UTC).isoformat(),
+            "payload": {},
+        },
+    )
+    late = client.post(
+        "/events",
+        json={
+            "event_id": str(late_event_id),
+            "shipment_id": shipment_id,
+            "event_type": "PICKUP_COMPLETED",
+            "source": "carrier_api",
+            "occurred_at": datetime(2026, 9, 7, 11, 55, tzinfo=UTC).isoformat(),
+            "payload": {},
+        },
+    )
+    history = client.get(f"/shipments/{shipment_id}/events")
+
+    assert scheduled.status_code == 200
+    assert late.status_code == 200
+    assert late.json()["status"] == "SCHEDULED"
+    by_event_id = {event["event_id"]: event for event in history.json()}
+    assert by_event_id[str(scheduled_event_id)]["processing_status"] == "APPLIED"
+    assert by_event_id[str(late_event_id)]["processing_status"] == "STORED_OUT_OF_ORDER"

@@ -15,15 +15,18 @@ Implemented capabilities include:
 
 - `Shipment`, immutable `ShipmentEvent`s, lifecycle state machine, and event
   handler;
-- sequential idempotency by `event_id`;
+- idempotency by `event_id`, including PostgreSQL unique-key conflict recovery
+  for concurrent duplicate delivery;
+- durable out-of-order event classification: valid late events remain in history
+  without regressing the current shipment projection;
 - PostgreSQL repositories behind application ports;
 - atomic creation of a shipment and its historical `SHIPMENT_CREATED` event;
 - FastAPI endpoints for shipments and operational events;
 - isolated PostgreSQL integration tests, including constraints, rollback, HTTP
   flow, and concurrent duplicate-event reproduction.
 
-Not implemented yet: concurrent conflict handling, out-of-order event policy,
-RabbitMQ, workers, retries, DLQ, transactional outbox, and observability.
+Not implemented yet: RabbitMQ, workers, retries, DLQ, transactional outbox, and
+observability.
 
 ## Architecture
 
@@ -165,6 +168,15 @@ DELAYED --DELIVERED--> DELIVERED
 The domain uses `occurred_at` to update `updated_at` when an event changes
 state or location. `received_at` records when the platform received the event.
 
+### Out-of-order events
+
+Every valid event is retained in shipment history. `processing_status` is
+`APPLIED` when it updates the current projection and `STORED_OUT_OF_ORDER` when
+it is retained only as historical evidence. Location and lifecycle timelines
+are evaluated independently: late locations cannot overwrite newer coordinates,
+and late lifecycle events cannot move current status backward. This domain
+policy is independent of Kafka and will be reused by a future worker.
+
 ## Tests and quality
 
 ```powershell
@@ -223,10 +235,10 @@ Architecture decisions are recorded in [app/docs/adr](app/docs/adr):
 - [ADR-002 — Phase 2 API and Persistence Evolution](app/docs/adr/002-Phase-2-API-and-Persistence-Evolution.md)
 - [ADR-003 — Atomic Shipment and SHIPMENT_CREATED Persistence](app/docs/adr/003-Atomic-Shipment-and-SHIPMENT_CREATED-Persistence.md)
 - [ADR-004 — Concurrent Idempotency Strategy](app/docs/adr/004-Concurrent-Idempotency-Strategy.md)
+- [ADR-005 — Out-of-Order Event Treatment](app/docs/adr/005-Out-of-Order-Event-Treatment.md)
 
 ## Next steps
 
 1. Implement Phase 3A: turn a concurrent unique-constraint conflict into a
    defined idempotent API outcome.
-2. Define and implement the out-of-order-event policy.
-3. Add RabbitMQ, workers, retries, DLQ, and Outbox in separate phases.
+2. Add RabbitMQ, workers, retries, DLQ, and Outbox in separate phases.

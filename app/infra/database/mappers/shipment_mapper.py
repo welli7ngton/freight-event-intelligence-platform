@@ -16,6 +16,7 @@ def to_domain(model: ShipmentModel) -> Shipment:
         current_latitude=model.current_latitude,
         current_longitude=model.current_longitude,
         last_location_at=model.last_location_at,
+        last_lifecycle_at=model.last_lifecycle_at,
     )
 
 
@@ -32,4 +33,5 @@ def to_model(shipment: Shipment) -> ShipmentModel:
         current_latitude=shipment.current_latitude,
         current_longitude=shipment.current_longitude,
         last_location_at=shipment.last_location_at,
+        last_lifecycle_at=shipment.last_lifecycle_at,
     )

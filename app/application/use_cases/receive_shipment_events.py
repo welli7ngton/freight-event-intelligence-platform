@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from app.application.ports.shipment_event_repository import (
     ShipmentEventRepository,
 )
@@ -36,12 +38,18 @@ class ReceiveShipmentEvent:
         if self._shipment_event_repository.exists(event.event_id):
             return shipment
 
-        self._event_handler.handle(
+        processing_status = self._event_handler.handle(
             shipment,
             event,
         )
 
-        self._shipment_event_repository.save(event)
+        recorded_event = replace(event, processing_status=processing_status)
+
+        self._shipment_event_repository.save(recorded_event)
         self._shipment_repository.save(shipment)
 
         return shipment
+
+    def get_current_shipment(self, shipment_id) -> Shipment | None:
+        """Reload the persisted projection after a transaction-level conflict."""
+        return self._shipment_repository.get(shipment_id)

@@ -49,3 +49,9 @@ class ShipmentEventModel(Base):
         JSONType,
         nullable=False,
     )
+
+    processing_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default="APPLIED",
+    )

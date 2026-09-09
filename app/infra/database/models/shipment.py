@@ -65,3 +65,8 @@ class ShipmentModel(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+    last_lifecycle_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )

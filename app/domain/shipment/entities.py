@@ -23,6 +23,7 @@ class Shipment:
     current_latitude: float | None = None
     current_longitude: float | None = None
     last_location_at: datetime | None = None
+    last_lifecycle_at: datetime | None = None
 
     @classmethod
     def create(
@@ -56,6 +57,7 @@ class Shipment:
             event_type=event_type,
         )
         self.updated_at = occurred_at
+        self.last_lifecycle_at = occurred_at
 
     def update_location(
         self,

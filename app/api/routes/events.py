@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from app.api.dependencies import get_receive_shipment_event_use_case
+from app.api.dependencies import get_db, get_receive_shipment_event_use_case
 from app.api.schemas.errors import ErrorResponse
 from app.api.schemas.event import ShipmentEventRequest
 from app.api.schemas.shipment import ShipmentResponse
@@ -13,6 +13,8 @@ from app.domain.shipment.exceptions import (
     InvalidStateTransition,
 )
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 router = APIRouter(
     prefix="/events",
@@ -47,6 +49,7 @@ router = APIRouter(
 def receive_event(
     request: ShipmentEventRequest,
     use_case: ReceiveShipmentEvent = Depends(get_receive_shipment_event_use_case),
+    db: Session = Depends(get_db),
 ):
     event = ShipmentEvent(
         event_id=request.event_id,
@@ -59,7 +62,22 @@ def receive_event(
     )
 
     try:
-        return use_case.execute(event)
+        shipment = use_case.execute(event)
+        # The unique event-id constraint is the concurrent idempotency guard.
+        # Flushing exposes a collision while this route can still roll back and
+        # return the canonical persisted shipment to the duplicate caller.
+        db.flush()
+        return shipment
+    except IntegrityError as error:
+        db.rollback()
+
+        if not _is_duplicate_event_id(error):
+            raise
+
+        shipment = use_case.get_current_shipment(event.shipment_id)
+        if shipment is None:
+            raise
+        return shipment
     except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -75,3 +93,9 @@ def receive_event(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(error),
         ) from error
+
+
+def _is_duplicate_event_id(error: IntegrityError) -> bool:
+    """Return whether PostgreSQL rejected the shipment event identity key."""
+    diagnostic = getattr(error.orig, "diag", None)
+    return getattr(diagnostic, "constraint_name", None) == "shipment_events_pkey"

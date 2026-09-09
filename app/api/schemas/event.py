@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from app.domain.shipment.events import ShipmentEventType
+from app.domain.shipment.events import ShipmentEventProcessingStatus, ShipmentEventType
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -89,4 +89,11 @@ class ShipmentEventResponse(BaseModel):
     payload: dict = Field(
         description="Event-specific data received from the producer.",
         examples=[{"latitude": -3.7319, "longitude": -38.5267}],
+    )
+    processing_status: ShipmentEventProcessingStatus = Field(
+        description=(
+            "Whether the event updated the current shipment projection or was "
+            "retained as an out-of-order historical event."
+        ),
+        examples=["APPLIED"],
     )

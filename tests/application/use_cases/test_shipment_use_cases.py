@@ -9,7 +9,7 @@ from app.application.use_cases.receive_shipment_events import (
     ReceiveShipmentEvent,
 )
 from app.domain.shipment.event_handler import ShipmentEventHandler
-from app.domain.shipment.events import ShipmentEventType
+from app.domain.shipment.events import ShipmentEventProcessingStatus, ShipmentEventType
 from app.domain.shipment.exceptions import InvalidShipmentEvent
 from app.domain.shipment.state_machine import ShipmentStatus
 from tests.factories.shipment import make_event, make_shipment
@@ -74,6 +74,40 @@ def test_receive_shipment_event_is_idempotent(in_memory_repositories) -> None:
     assert first_result.status.value == "SCHEDULED"
     assert second_result.status.value == "SCHEDULED"
     assert event_repository.items == [event]
+
+
+def test_receive_late_event_persists_history_without_changing_projection(
+    in_memory_repositories,
+) -> None:
+    shipment_repository, event_repository = in_memory_repositories
+    shipment = make_shipment()
+    shipment_repository.save(shipment)
+    use_case = ReceiveShipmentEvent(
+        shipment_repository=shipment_repository,
+        shipment_event_repository=event_repository,
+        event_handler=ShipmentEventHandler(),
+    )
+    use_case.execute(
+        make_event(
+            shipment=shipment,
+            event_type=ShipmentEventType.PICKUP_SCHEDULED,
+            occurred_at=datetime(2026, 9, 8, 10, 0, tzinfo=UTC),
+        )
+    )
+    late_event = make_event(
+        shipment=shipment,
+        event_type=ShipmentEventType.PICKUP_COMPLETED,
+        occurred_at=datetime(2026, 9, 8, 9, 55, tzinfo=UTC),
+    )
+
+    result = use_case.execute(late_event)
+
+    assert result.status is ShipmentStatus.SCHEDULED
+    assert event_repository.items[-1].event_id == late_event.event_id
+    assert (
+        event_repository.items[-1].processing_status
+        is ShipmentEventProcessingStatus.STORED_OUT_OF_ORDER
+    )
 
 
 def test_receive_shipment_created_event_is_rejected_before_processing(
