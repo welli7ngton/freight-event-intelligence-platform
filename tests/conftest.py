@@ -2,6 +2,7 @@ import os
 from collections.abc import Generator
 from pathlib import Path
 
+import pika
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -17,6 +18,10 @@ from tests.factories.shipment import make_event, make_shipment
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
     "postgresql+psycopg://postgres:postgres@localhost:5433/freight_events_test",
+)
+TEST_RABBITMQ_URL = os.getenv(
+    "TEST_RABBITMQ_URL",
+    "amqp://guest:guest@localhost:5672/%2F",
 )
 
 
@@ -57,6 +62,21 @@ def integration_engine() -> Generator[Engine, None, None]:
 
     yield engine
     engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def rabbitmq_url() -> str:
+    parameters = pika.URLParameters(TEST_RABBITMQ_URL)
+    try:
+        connection = pika.BlockingConnection(parameters)
+    except pika.exceptions.AMQPConnectionError:
+        pytest.fail(
+            "RabbitMQ de integraÃ§Ã£o indisponÃ­vel. Execute "
+            "'docker compose up -d rabbitmq' e confira TEST_RABBITMQ_URL."
+        )
+    else:
+        connection.close()
+    return TEST_RABBITMQ_URL
 
 
 @pytest.fixture
