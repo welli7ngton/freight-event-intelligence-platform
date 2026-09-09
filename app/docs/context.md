@@ -4,11 +4,16 @@
 
 ## 1. Current phase
 
-O projeto esta na **Fase 2 - API/Persistence, em andamento**.
+O projeto concluiu as Fases 2.5, 2.6, 3, 4 e 5. A proxima etapa e a
+**Fase 6 - Transactional Outbox**.
 
 A Fase 1 foi implementada com entidade `Shipment`, eventos imutaveis, state machine, handler, excecoes de dominio e testes unitarios.
 
-A Fase 2 possui contratos de aplicacao, casos de uso, uma camada FastAPI funcional, SQLAlchemy, PostgreSQL, repositories, mapper e Alembic. A API ja possui rotas e schemas e a aplicacao FastAPI importa corretamente em ambiente local. A parte de integracao com PostgreSQL real continua pendente, mas a camada API e de aplicacao esta operacional no codigo atual.
+A Fase 2 possui contratos de aplicacao, casos de uso, FastAPI, SQLAlchemy,
+PostgreSQL, repositories, mappers e Alembic. A persistencia, constraints,
+rollback, fluxo HTTP e corrida concorrente foram validados contra PostgreSQL
+isolado. RabbitMQ agora oferece uma entrada assincrona com retries limitados e
+dead-letter queue; o HTTP continua sincrono e autoritativo ate a Outbox.
 
 ## 2. Estrutura real
 
@@ -68,6 +73,10 @@ tests/
 └── infra/database/test_shipment_mapper.py
 ```
 
+Tambem existem `app/application/messaging/`,
+`app/application/ports/shipment_event_publisher.py`, `app/infra/messaging/` e
+`app/workers/shipment_event_worker.py`.
+
 O diretorio `api` possui uma aplicacao FastAPI, rotas, schemas Pydantic e dependencias de banco. O diretorio `workers` possui o worker RabbitMQ, que converte a mensagem versionada e reutiliza `ReceiveShipmentEvent`; ele nao possui regras de dominio.
 
 ## 3. Dominio implementado
@@ -82,12 +91,9 @@ O diretorio `api` possui uma aplicacao FastAPI, rotas, schemas Pydantic e depend
 
 `update_location(payload, occurred_at)` atualiza latitude, longitude, `last_location_at` e `updated_at`. A shipment tambem preserva `last_lifecycle_at`, separado do tempo da localizacao.
 
-Ainda nao existem na entidade:
-
-- idempotencia;
-- processamento de eventos fora de ordem;
-- controle de concorrencia;
-- emissao de eventos de dominio.
+Idempotencia e concorrencia sao responsabilidades da application e da
+persistencia, nao da entidade. A entidade nao emite eventos de dominio nesta
+versao.
 
 ### Eventos
 
@@ -100,6 +106,7 @@ Ainda nao existem na entidade:
 - `occurred_at`;
 - `received_at`;
 - `payload`.
+- `processing_status` (`APPLIED` ou `STORED_OUT_OF_ORDER`).
 
 `LocationUpdatedPayload` e imutavel e possui `latitude` e `longitude`.
 
@@ -138,7 +145,9 @@ Transicoes nao cadastradas lancam `InvalidStateTransition`.
 3. atualiza localizacao ou aplica a transicao correspondente;
 4. usa `event.occurred_at` como timestamp da alteracao.
 
-O handler nao persiste, nao faz commit, nao deduplica e nao reprocessa eventos atrasados.
+O handler nao persiste, nao faz commit, nao deduplica e nao executa replay
+historico. Ele classifica eventos atrasados sem permitir regressao da projecao
+atual.
 
 ## 4. Application Layer
 
@@ -148,12 +157,16 @@ O handler nao persiste, nao faz commit, nao deduplica e nao reprocessa eventos a
 
 `ShipmentEventRepository` define `exists`, `save` e `list_by_shipment`.
 
+`ShipmentEventPublisher` e um `Protocol` para publicar uma mensagem sem
+acoplar a application ao RabbitMQ. A implementacao atual e
+`RabbitMQShipmentEventPublisher`.
+
 ### Use cases
 
 - `CreateShipment` gera UUID e timestamp UTC, cria a entidade `Shipment`, cria o evento `SHIPMENT_CREATED` e persiste tanto a shipment quanto o evento no mesmo fluxo de aplicacao.
 - `GetShipment` consulta uma shipment pelo ID.
 - `GetShipmentEvents` lista eventos de uma shipment.
-- `ReceiveShipmentEvent` rejeita `SHIPMENT_CREATED`, busca a shipment, verifica duplicidade por `event_id`, processa o evento pelo handler e salva o evento e a shipment atualizada.
+- `ReceiveShipmentEvent` rejeita `SHIPMENT_CREATED`, busca a shipment, verifica duplicidade por `event_id`, processa o evento pelo handler, persiste o `processing_status` e salva a shipment atualizada.
 
 Os casos de uso possuem testes com repositories em memoria para validar os contratos principais. O teste de criacao agora verifica que a `Shipment` e o evento `SHIPMENT_CREATED` sao gerados e persistidos no mesmo caso de uso.
 
@@ -303,7 +316,10 @@ Para `SHIPMENT_CREATED`, o valor de `occurred_at` deve coincidir com o momento d
 Shipment.created_at == ShipmentEvent(SHIPMENT_CREATED).occurred_at
 ```
 
-Essa diferenca e importante para evoluir futuramente a politica de eventos fora de ordem. Hoje o sistema ordena eventos por `occurred_at` em consultas e em alguns fluxos, mas ainda nao define uma politica robusta de aceitacao/reprocessamento de eventos atrasados.
+Essa diferenca orienta a politica atual de eventos fora de ordem: eventos
+validos atrasados continuam no historico, mas nao alteram a projecao atual se
+regredissem seu relogio de lifecycle ou localizacao. Replay/reconciliacao
+temporal completa continua planejado, nao implementado.
 
 ## 9. Persistencia implementada
 
@@ -321,8 +337,9 @@ Essa diferenca e importante para evoluir futuramente a politica de eventos fora 
 - `current_latitude`;
 - `current_longitude`;
 - `last_location_at`.
+- `last_lifecycle_at`.
 
-`ShipmentEventModel` representa `shipment_events` com chave primaria `event_id`, foreign key para shipment, tipo, source, timestamps e payload JSONB.
+`ShipmentEventModel` representa `shipment_events` com chave primaria `event_id`, foreign key para shipment, tipo, source, timestamps, payload JSONB e `processing_status`.
 
 O repository de eventos converte dataclasses de payload para dicionarios antes de persistir.
 
@@ -330,10 +347,11 @@ O mapper converte status ORM para `ShipmentStatus` e preserva os campos de local
 
 ### Alembic
 
-Existem duas migrations:
+Existem tres migrations:
 
 1. cria `shipments` e `shipment_events`;
 2. adiciona os campos de localizacao em `shipments`.
+3. adiciona `last_lifecycle_at` e `shipment_events.processing_status`.
 
 A migration de localizacao foi aplicada com sucesso usando `alembic upgrade head` contra o PostgreSQL local.
 
@@ -349,34 +367,63 @@ Essa estrategia nao cria uma tabela dedicada `processed_events` e nao representa
 
 A plataforma persiste todo evento valido, inclusive os recebidos fora de ordem. O campo `processing_status` em `shipment_events` registra `APPLIED` quando o evento atualiza a projecao corrente ou `STORED_OUT_OF_ORDER` quando permanece apenas no historico. Localizacoes atrasadas nao sobrescrevem uma localizacao mais recente; lifecycle atrasado nao altera o status corrente. Os dois relogios sao independentes (`last_location_at` e `last_lifecycle_at`), portanto uma localizacao mais nova nao bloqueia uma transicao de lifecycle valida. Nao existe replay historico nesta versao; ele podera ser adicionado quando houver necessidade de reconciliacao.
 
-## 12. Testes e validacao do estado atual
+## 12. RabbitMQ, worker, retries e DLQ
+
+RabbitMQ e um adapter de infraestrutura para ingestao assincrona. O contrato
+`shipment.event.received.v1` e versionado e carrega `message_id`, `event_id`,
+identidade da shipment, tipo, source, timestamps e payload. O `event_id`
+continua sendo a identidade de deduplicacao; um redelivery pode ter outro
+`message_id` sem reaplicar um fato de negocio.
+
+O worker em `app/workers/shipment_event_worker.py` desserializa a mensagem,
+abre uma Session, chama `ReceiveShipmentEvent`, executa commit e somente entao
+envia ACK ao RabbitMQ. Ele nao contem regras de transicao, idempotencia ou
+tratamento de ordem.
+
+A topologia possui exchange e fila principal, exchange/fila de retry e
+exchange/fila DLQ. Falhas invalidas de mensagem ou negocio sao enviadas
+diretamente para a DLQ. Falhas transitorias, como `OperationalError`, timeout
+ou erro desconhecido, recebem retry limitado. A fila de retry aplica TTL e
+devolve a mensagem para a fila principal; tentativas esgotadas seguem para a
+DLQ. O corpo original e preservado e os headers registram contagem de
+tentativas, primeira falha e o ultimo erro.
+
+`POST /events` ainda e sincrono e nao publica automaticamente no RabbitMQ.
+Essa publicacao sera adicionada somente com Transactional Outbox, para evitar a
+inconsistencia entre commit no PostgreSQL e publish no broker.
+
+## 13. Testes e validacao do estado atual
 
 Os testes presentes no repositorio confirmam o contrato atual de criacao e processamento de eventos:
 
 - testes de dominio validam `Shipment`, `ShipmentEvent` e `ShipmentStateMachine`;
 - testes de aplicacao validam `CreateShipment` e `ReceiveShipmentEvent` com repositories em memoria;
 - testes de API validam health, criacao de shipment, consulta de shipment, consulta de eventos e recebimento de evento do lifecycle;
+- testes de messaging validam contrato versionado, publisher, consumer, retry,
+  classificacao de falhas e DLQ;
 - o teste de infraestrutura verifica rollback quando a persistencia do evento de criacao falha;
 - os testes de aplicacao verificam a rejeicao de `SHIPMENT_CREATED` no use case e no handler;
 - o teste mais importante para a semantica atual verifica que a criacao de shipment inclui o registro do evento `SHIPMENT_CREATED` no mesmo fluxo do use case.
 
-Validacao atual do repositorio: a suite unitária e de API executa com sucesso em ambiente local (`41 passed` em pytest, com integracao excluida por padrao), confirmando que a aplicacao FastAPI e os contratos principais estao funcionando no estado atual do codigo. Houve uma advertencia de deprecacao do Starlette/AnyIO, sem falha de teste.
+Validacao atual do repositorio: a suite unitária e de API executa com sucesso
+em ambiente local (`49 passed` em pytest, com integracao excluida por padrao).
+Os testes cobrem tambem o contrato RabbitMQ, publisher, consumer, retries e
+classificacao de falhas.
 
-Acoes de integracao com PostgreSQL ainda sao pendentes para validar com banco real:
+Acoes de integracao com PostgreSQL e RabbitMQ relevantes para as fases atuais
+foram validadas. A suite unitÃ¡ria e de API possui `49 passed`; a suite de
+integracao possui `13 passed`, incluindo persistencia, constraints,
+concorrencia, fluxo HTTP, consumo de mensagem e preservacao na DLQ. Ha uma
+advertencia de deprecacao do Starlette/AnyIO, sem falha.
 
-- commit e rollback em fluxo de request;
-- persistencia real de shipment e eventos;
-- violacao de constraint;
-- concorrencia;
-- integracao de endpoints com banco.
+O proximo risco arquitetural e a entrega confiavel de eventos aceitos via HTTP,
+que sera tratada pela Transactional Outbox.
 
-## 13. Funcionalidades planejadas
+## 14. Funcionalidades planejadas
 
 Ainda nao estao implementados:
 
 - Redis;
-- idempotencia completa concorrente;
-- politica formal de eventos fora de ordem;
 - Transactional Outbox;
 - logging estruturado;
 - metricas Prometheus;
@@ -384,7 +431,7 @@ Ainda nao estao implementados:
 
 Esses itens continuam sendo evolucoes futuras e nao representam capacidades atuais do sistema.
 
-## 14. Resumo
+## 15. Resumo
 
 O dominio e os contratos principais da aplicacao estao implementados e consistentes com a estrutura atual do codigo. A API expõe o contrato real de criacao, consulta e processamento de eventos, e a operacao de criacao de Shipment agora inclui o registro do evento `SHIPMENT_CREATED` dentro do mesmo `CreateShipment`. A aplicacao foi validada em contexto de teste e importa corretamente, sem erros de montagem da FastAPI no estado atual do repositorio.
 
