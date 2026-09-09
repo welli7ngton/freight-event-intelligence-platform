@@ -1,0 +1,1 @@
+"""Versioned integration-message contracts."""
