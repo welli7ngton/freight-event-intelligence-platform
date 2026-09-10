@@ -1,5 +1,9 @@
+import logging
 from collections.abc import Callable
+from contextlib import ExitStack
+from copy import copy
 from datetime import UTC, datetime
+from time import monotonic
 
 import pika
 from app.application.messaging.shipment_event_message import (
@@ -12,6 +16,15 @@ from app.infra.messaging.failure_classifier import (
     FailureDisposition,
     ShipmentEventFailureClassifier,
 )
+from app.infra.observability.context import (
+    correlation_id,
+    current_context,
+    observation_context,
+)
+from app.infra.observability.logging import observe
+from app.infra.observability.metrics import worker_metrics
+
+logger = logging.getLogger(__name__)
 
 RETRY_ROUTING_KEY = "shipment.event.retry.v1"
 DEAD_LETTER_ROUTING_KEY = "shipment.event.dead-letter.v1"
@@ -48,6 +61,8 @@ class RabbitMQShipmentEventPublisher(ShipmentEventPublisher):
                     content_type="application/json",
                     delivery_mode=pika.DeliveryMode.Persistent,
                     message_id=str(message.message_id),
+                    correlation_id=current_context().get("correlation_id")
+                    or str(message.message_id),
                     type=EVENT_RECEIVED_ROUTING_KEY,
                 ),
             )
@@ -160,20 +175,67 @@ class RabbitMQShipmentEventConsumer:
         handle_event: Callable[[ShipmentEvent], None],
         properties: pika.BasicProperties | None = None,
     ) -> None:
-        try:
-            message = ShipmentEventMessage.from_json(body)
-            handle_event(message.to_event())
-        except Exception as error:
-            self._handle_failure(
-                channel=channel,
-                delivery_tag=delivery_tag,
-                properties=properties,
-                body=body,
-                error=error,
-            )
-            return
+        properties = copy(properties) if properties else pika.BasicProperties()
+        identity = correlation_id(properties.correlation_id or properties.message_id)
+        properties.correlation_id = identity
+        started = monotonic()
+        with (
+            observation_context(correlation_id=identity, component="ingestion"),
+            ExitStack() as context,
+        ):
+            try:
+                try:
+                    message = ShipmentEventMessage.from_json(body)
+                    context.enter_context(
+                        observation_context(
+                            message_id=str(message.message_id),
+                            event_id=str(message.event_id),
+                            shipment_id=str(message.shipment_id),
+                        )
+                    )
+                    handle_event(message.to_event())
+                except Exception as error:
+                    worker_metrics.ingestion.labels("processing_failed").inc()
+                    observe(
+                        logger,
+                        "ingestion_processing",
+                        outcome="failed",
+                        error_type=type(error).__name__,
+                    )
+                    self._handle_failure(
+                        channel=channel,
+                        delivery_tag=delivery_tag,
+                        properties=properties,
+                        body=body,
+                        error=error,
+                    )
+                    return
+                self._ack(channel, delivery_tag)
+            finally:
+                elapsed = monotonic() - started
+                worker_metrics.ingestion_duration.observe(elapsed)
+                observe(
+                    logger,
+                    "ingestion_delivery",
+                    outcome="finished",
+                    duration_seconds=elapsed,
+                )
 
-        channel.basic_ack(delivery_tag=delivery_tag)
+    @staticmethod
+    def _ack(channel, delivery_tag: int) -> None:
+        try:
+            channel.basic_ack(delivery_tag=delivery_tag)
+        except Exception as error:
+            worker_metrics.ingestion.labels("ack_failed").inc()
+            observe(
+                logger,
+                "ingestion_ack",
+                outcome="failed",
+                error_type=type(error).__name__,
+            )
+            raise
+        worker_metrics.ingestion.labels("acked").inc()
+        observe(logger, "ingestion_ack", outcome="returned")
 
     def _handle_failure(
         self,
@@ -207,13 +269,37 @@ class RabbitMQShipmentEventConsumer:
             exchange = self._dead_letter_exchange
             routing_key = DEAD_LETTER_ROUTING_KEY
 
-        channel.basic_publish(
-            exchange=exchange,
-            routing_key=routing_key,
-            body=body,
-            properties=self._failure_properties(properties, headers),
+        try:
+            channel.basic_publish(
+                exchange=exchange,
+                routing_key=routing_key,
+                body=body,
+                properties=self._failure_properties(properties, headers),
+            )
+        except Exception as publish_error:
+            worker_metrics.ingestion.labels("republish_failed").inc()
+            observe(
+                logger,
+                "ingestion_republish",
+                outcome="failed",
+                error_type=type(publish_error).__name__,
+                attempt=attempt_count,
+            )
+            raise
+        outcome = (
+            "retry_publish_returned"
+            if routing_key == RETRY_ROUTING_KEY
+            else "dlq_publish_returned"
         )
-        channel.basic_ack(delivery_tag=delivery_tag)
+        worker_metrics.ingestion.labels(outcome).inc()
+        observe(
+            logger,
+            "ingestion_republish",
+            outcome=outcome,
+            attempt=attempt_count,
+            error_type=type(error).__name__,
+        )
+        self._ack(channel, delivery_tag)
 
     @staticmethod
     def _failure_properties(
@@ -224,6 +310,7 @@ class RabbitMQShipmentEventConsumer:
             content_type=(original.content_type if original else "application/json"),
             delivery_mode=pika.DeliveryMode.Persistent,
             message_id=original.message_id if original else None,
+            correlation_id=original.correlation_id if original else None,
             type=original.type if original else EVENT_RECEIVED_ROUTING_KEY,
             headers=headers,
         )

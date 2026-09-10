@@ -1,4 +1,6 @@
+import logging
 from collections.abc import Generator
+from time import monotonic
 
 from app.application.use_cases.create_shipment import CreateShipment
 from app.application.use_cases.get_shipment import GetShipment
@@ -9,18 +11,38 @@ from app.infra.database.repositories.event import SQLAlchemyShipmentEventReposit
 from app.infra.database.repositories.outbox import SQLAlchemyOutboxRepository
 from app.infra.database.repositories.shipment import SQLAlchemyShipmentRepository
 from app.infra.database.session import SessionLocal
+from app.infra.observability.context import current_context
+from app.infra.observability.logging import observe
 from fastapi import Depends
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
+    started = monotonic()
 
     try:
         yield db
         db.commit()
-    except Exception:
+        observe(
+            logger,
+            "database_transaction",
+            component="api",
+            outcome="committed",
+            duration_seconds=monotonic() - started,
+        )
+    except Exception as error:
         db.rollback()
+        observe(
+            logger,
+            "database_transaction",
+            component="api",
+            outcome="rolled_back",
+            error_type=type(error).__name__,
+            duration_seconds=monotonic() - started,
+        )
         raise
     finally:
         db.close()
@@ -48,6 +70,7 @@ def get_create_shipment_use_case(
         shipment_repository=shipment_repository,
         shipment_event_repository=shipment_event_repository,
         outbox_repository=SQLAlchemyOutboxRepository(db),
+        correlation_id=current_context().get("correlation_id"),
     )
 
 
@@ -79,4 +102,5 @@ def get_receive_shipment_event_use_case(
         shipment_event_repository=event_repository,
         event_handler=event_handler,
         outbox_repository=SQLAlchemyOutboxRepository(db),
+        correlation_id=current_context().get("correlation_id"),
     )
