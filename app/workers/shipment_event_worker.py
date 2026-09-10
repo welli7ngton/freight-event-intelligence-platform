@@ -12,6 +12,7 @@ from app.infra.config import (
     get_rabbitmq_url,
 )
 from app.infra.database.repositories.event import SQLAlchemyShipmentEventRepository
+from app.infra.database.repositories.outbox import SQLAlchemyOutboxRepository
 from app.infra.database.repositories.shipment import SQLAlchemyShipmentRepository
 from app.infra.database.session import SessionLocal
 from app.infra.messaging.rabbitmq import RabbitMQShipmentEventConsumer
@@ -23,14 +24,14 @@ def handle_event(event) -> None:
             shipment_repository=SQLAlchemyShipmentRepository(session),
             shipment_event_repository=SQLAlchemyShipmentEventRepository(session),
             event_handler=ShipmentEventHandler(),
+            outbox_repository=SQLAlchemyOutboxRepository(session),
         )
         try:
             use_case.execute(event)
+            session.commit()
         except Exception:
             session.rollback()
             raise
-        else:
-            session.commit()
 
 
 def main() -> None:

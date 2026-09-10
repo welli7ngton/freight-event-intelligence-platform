@@ -1,9 +1,13 @@
 from logging.config import fileConfig
 
 from alembic import context
-from app.infra.database.base import Base
 from app.infra.config import get_database_url
-from app.infra.database.models import ShipmentEventModel, ShipmentModel
+from app.infra.database.base import Base
+from app.infra.database.models import (
+    OutboxEventModel,
+    ShipmentEventModel,
+    ShipmentModel,
+)
 from sqlalchemy import engine_from_config, pool
 
 config = context.config
@@ -14,6 +18,7 @@ if config.config_file_name is not None:
 
 
 target_metadata = Base.metadata
+
 
 def run_migrations_offline() -> None:
     url = get_database_url()

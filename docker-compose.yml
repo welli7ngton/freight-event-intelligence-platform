@@ -55,7 +55,14 @@ services:
   rabbitmq:
     image: rabbitmq:4-management
     container_name: freight-rabbitmq
+    hostname: freight-rabbitmq
     restart: unless-stopped
+
+    environment:
+      RABBITMQ_NODENAME: rabbit@freight-rabbitmq
+
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
 
     ports:
       - "${RABBITMQ_PORT:-5672}:5672"
@@ -69,5 +76,6 @@ services:
 
 
 volumes:
+  rabbitmq_data:
   postgres_data:
   postgres_test_data:

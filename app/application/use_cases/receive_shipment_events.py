@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+from app.application.messaging.recorded_event_message import RecordedEventMessage
+from app.application.ports.outbox_repository import OutboxRepository
 from app.application.ports.shipment_event_repository import (
     ShipmentEventRepository,
 )
@@ -18,10 +20,12 @@ class ReceiveShipmentEvent:
         shipment_repository: ShipmentRepository,
         shipment_event_repository: ShipmentEventRepository,
         event_handler: ShipmentEventHandler,
+        outbox_repository: OutboxRepository,
     ):
         self._shipment_repository = shipment_repository
         self._shipment_event_repository = shipment_event_repository
         self._event_handler = event_handler
+        self._outbox_repository = outbox_repository
 
     def execute(
         self,
@@ -47,6 +51,7 @@ class ReceiveShipmentEvent:
 
         self._shipment_event_repository.save(recorded_event)
         self._shipment_repository.save(shipment)
+        self._outbox_repository.add(RecordedEventMessage.from_event(recorded_event))
 
         return shipment
 

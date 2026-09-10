@@ -1,1 +1,21 @@
-Generic single-database configuration.
+Single PostgreSQL database migrations for Freight Event Intelligence Platform.
+
+Run from the repository root with the development environment active:
+  task db-current
+  task db-history
+  task db-migrate
+  task db-revision -- "description"
+
+DATABASE_URL is required and loaded through app.infra.config, including .env.
+alembic/env.py imports ORM models to populate Base.metadata for autogeneration.
+Review generated upgrades and downgrades before applying them.
+
+Current revision chain:
+  34fe2111c108: shipments and shipment_events
+  6f8e4c7a1b2d: shipment location fields
+  8b7c3d2e1f0a: lifecycle timestamp and event processing status
+
+task db-rollback downgrades one revision and changes database state.
+Integration fixtures apply migrations to the isolated freight_events_test
+database. Follow README.md for test URL setup; never use the development
+database for integration fixtures that clean tables.

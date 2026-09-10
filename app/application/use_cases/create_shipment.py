@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.application.messaging.recorded_event_message import RecordedEventMessage
+from app.application.ports.outbox_repository import OutboxRepository
 from app.application.ports.shipment_event_repository import (
     ShipmentEventRepository,
 )
@@ -28,9 +30,11 @@ class CreateShipment:
         self,
         shipment_repository: ShipmentRepository,
         shipment_event_repository: ShipmentEventRepository,
+        outbox_repository: OutboxRepository,
     ):
         self._shipment_repository = shipment_repository
         self._shipment_event_repository = shipment_event_repository
+        self._outbox_repository = outbox_repository
 
     def execute(
         self,
@@ -59,5 +63,6 @@ class CreateShipment:
 
         self._shipment_repository.save(shipment)
         self._shipment_event_repository.save(event)
+        self._outbox_repository.add(RecordedEventMessage.from_event(event))
 
         return shipment

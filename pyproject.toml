@@ -39,7 +39,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-vv --strict-markers -m 'not integration'"
 markers = [
-    "integration: tests that require the isolated PostgreSQL test database",
+    "integration: tests that require isolated PostgreSQL and/or RabbitMQ",
 ]
 
 [tool.ruff]
@@ -76,6 +76,7 @@ db-up = "docker compose up -d postgres"
 broker-up = "docker compose up -d rabbitmq"
 broker-down = "docker compose stop rabbitmq"
 worker = "python -m app.workers.shipment_event_worker"
+outbox-worker = "python -m app.workers.outbox_worker"
 db-down = "docker compose down"
 db-logs = "docker compose logs -f postgres"
 db-migrate = "alembic upgrade head"

@@ -6,6 +6,7 @@ from app.application.use_cases.get_shipment_events import GetShipmentEvents
 from app.application.use_cases.receive_shipment_events import ReceiveShipmentEvent
 from app.domain.shipment.event_handler import ShipmentEventHandler
 from app.infra.database.repositories.event import SQLAlchemyShipmentEventRepository
+from app.infra.database.repositories.outbox import SQLAlchemyOutboxRepository
 from app.infra.database.repositories.shipment import SQLAlchemyShipmentRepository
 from app.infra.database.session import SessionLocal
 from fastapi import Depends
@@ -46,6 +47,7 @@ def get_create_shipment_use_case(
     return CreateShipment(
         shipment_repository=shipment_repository,
         shipment_event_repository=shipment_event_repository,
+        outbox_repository=SQLAlchemyOutboxRepository(db),
     )
 
 
@@ -76,4 +78,5 @@ def get_receive_shipment_event_use_case(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
         event_handler=event_handler,
+        outbox_repository=SQLAlchemyOutboxRepository(db),
     )
