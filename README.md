@@ -73,16 +73,73 @@ is ignored by Git; `.env.example` contains local example values to replace.
 `DATABASE_URL` and `RABBITMQ_URL` are required by their respective adapters;
 application configuration loads `.env` using python-dotenv.
 
-Start PostgreSQL and apply migrations:
+### Recommended local workflow
+
+Run these commands from the repository root. Keep the API, workers, and tests
+in separate terminals when they need to run at the same time:
+
+```powershell
+# Starts the application PostgreSQL container and applies Alembic migrations.
+task setup
+
+# Start the API.
+task api
+
+# In another terminal, start RabbitMQ and the ingestion worker when testing
+# asynchronous ingestion.
+task broker-up
+task worker
+
+# In another terminal, start the transactional outbox relay when testing
+# recorded-event notifications.
+task outbox-worker
+```
+
+`task setup` is equivalent to `task db-up` followed by `task db-migrate`.
+`DATABASE_URL` is used by the API and Alembic. PostgreSQL container credentials
+and the isolated test database URL are configured through `.env`. Use a
+different `.env` per environment, supplied by that environment's secrets
+mechanism in staging and production.
+
+To see every available task and its command:
+
+```powershell
+task --list
+```
+
+### Build and run the API image
+
+Build the production image from the repository root:
+
+```powershell
+docker build --tag freight-event-intelligence-platform:local .
+```
+
+The image runs the API as a non-root user on port `8000` and includes a
+container health check for `/health`. Start PostgreSQL and RabbitMQ first:
 
 ```powershell
 task setup
+task broker-up
 ```
 
-`DATABASE_URL` is used by the API and Alembic. PostgreSQL container credentials
-and the isolated test database URL are also configured through `.env`. Use a
-different `.env` per environment, supplied by that environment's secrets
-mechanism in staging and production.
+When those services run on the host, use `host.docker.internal` in the
+container's connection URLs. The `.env` file normally uses `localhost`, which
+would refer to the API container itself:
+
+```powershell
+docker run --rm --name freight-api `
+  --env-file .env `
+  -e DATABASE_URL="postgresql+psycopg://postgres:change-me@host.docker.internal:5432/freight_events" `
+  -e RABBITMQ_URL="amqp://guest:guest@host.docker.internal:5672/%2F" `
+  -p 8000:8000 `
+  freight-event-intelligence-platform:local
+```
+
+Check the running container with `http://127.0.0.1:8000/health`. The image is
+intended for the API process; run ingestion and outbox workers as separate
+containers from the same image with their respective task commands or module
+entry points.
 
 ## Run the API
 
@@ -195,45 +252,58 @@ occurrence time and is not a global monotonic watermark.
 
 ## Tests and quality
 
+The default pytest configuration excludes tests marked `integration`, so the
+fast local checks do not require Docker services:
+
 ```powershell
-task test-fast          # concise unit-test output
-task test               # default suite; integration tests are excluded
-task test-api           # API-layer tests
-task test-integration   # PostgreSQL and RabbitMQ integration tests
-task lint               # Ruff lint
-task lint-fix           # apply Ruff lint fixes
-task format             # format with Ruff
-task format-check       # check formatting
-task check              # formatting, lint, and tests
-task compile            # compile app and tests
+task test-fast       # concise unit-test output
+task test             # default suite; integration tests are excluded
+task test-api         # API-layer tests
+task lint             # Ruff lint
+task format           # format with Ruff
+task format-check     # check formatting without changing files
+task compile          # compile app and tests
 ```
 
-Run the following before submitting a change:
+For the normal pre-commit check, run:
 
 ```powershell
 task check
 ```
 
+`task check` runs `format-check`, `lint`, and the fast test suite. If Ruff
+reports fixable lint errors, use `task lint-fix`; use `task format` to rewrite
+formatting, then run `task check` again. `task ci` runs `task check` followed by
+`task compile`.
+
 ### Integration tests
 
 Database integration tests exclusively use `freight_events_test` in the
 `postgres-test` service on port `5433`; fixtures apply migrations and clean
-tables. The integration marker also includes RabbitMQ tests. Configure URLs
-before pytest imports its fixtures:
+tables. The integration marker also includes RabbitMQ tests. Start the isolated
+test database and broker first, then configure URLs before pytest imports its
+fixtures:
 
 ```powershell
 docker compose up -d postgres-test rabbitmq
+task test-integration
+```
+
+`task test-integration` reads `TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` from
+the process environment. If you use the Compose defaults, the fixture defaults
+already target `postgres-test` and local RabbitMQ. For values stored in `.env`,
+load them explicitly before running the task:
+
+```powershell
 python -c "from dotenv import load_dotenv; load_dotenv(); import pytest; raise SystemExit(pytest.main(['-m', 'integration']))"
 ```
 
-The command above loads `.env` before test collection. Alternatively export
-`TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` in the process environment and run
-`task test-integration`. The database must be named exactly
-`freight_events_test`. Tests otherwise default to a local PostgreSQL URL with
-password `postgres`, which differs from `.env.example`, and a local RabbitMQ
-URL. Run PostgreSQL-only coverage with
-`python -m pytest -m integration tests/integration/database tests/integration/api tests/infra/database`
-after exporting the test database URL.
+Alternatively set `TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` in the process
+environment before running `task test-integration`. The database must be named
+exactly `freight_events_test`. Tests otherwise default to a local PostgreSQL
+URL with password `postgres`, which differs from `.env.example`, and a local
+RabbitMQ URL. Stop the test services when finished with `docker compose stop
+postgres-test rabbitmq`.
 
 ## Database and migrations
 
@@ -340,6 +410,50 @@ a new UUID. The v1 JSON envelopes stay unchanged.
 | Ingestion worker | `http://127.0.0.1:9101/metrics` |
 | Outbox worker | `http://127.0.0.1:9102/metrics` |
 
+### View metrics directly
+
+The API exposes Prometheus text from `/metrics`. Start the process you want to
+inspect, then query its endpoint from PowerShell:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/metrics | Select-Object -Expand Content
+Invoke-WebRequest http://127.0.0.1:9101/metrics | Select-Object -Expand Content
+Invoke-WebRequest http://127.0.0.1:9102/metrics | Select-Object -Expand Content
+```
+
+The worker endpoints are available only while the corresponding worker is
+running. Worker metrics bind to `127.0.0.1` by default; for the Dockerized
+Prometheus container to scrape them, set the host to `0.0.0.0` in that worker's
+terminal before starting it:
+
+```powershell
+$env:METRICS_HOST = "0.0.0.0"
+task worker
+```
+
+Repeat with `task outbox-worker` in its own terminal. To inspect a particular
+Prometheus time series, open `http://127.0.0.1:9090/graph` after monitoring is
+started and run a PromQL query such as:
+
+```text
+up
+freight_http_requests_total
+freight_outbox_pending_events
+```
+
+The `up` series must be `1` for each process you expect Prometheus to scrape.
+For a ready-made view, start the optional monitoring profile and open the
+provisioned dashboard:
+
+```powershell
+task monitoring-up
+```
+
+Then visit `http://127.0.0.1:3000/d/freight-operations` for Grafana or
+`http://127.0.0.1:9090` for Prometheus. Allow two scrape intervals for rates to
+appear. Stop the monitoring containers with `task monitoring-down`; their named
+volumes preserve local history.
+
 Run one process per scrape target/port. Multiple Uvicorn workers sharing a port
 are not supported for aggregation. Counters reset on restart and represent
 observed attempts, not unique events. IDs are excluded from metric labels.
@@ -365,17 +479,8 @@ In terminals running each worker, set `$env:METRICS_HOST = "0.0.0.0"` before
 python -m uvicorn app.api.application:app --host 0.0.0.0 --port 8000
 ```
 
-Then start monitoring:
-
-```powershell
-task monitoring-up
-```
-
-Open Grafana at `http://127.0.0.1:3000/d/freight-operations` (local anonymous
-viewer) or Prometheus at `http://127.0.0.1:9090`. The dashboard covers scrape
-health, HTTP errors/latency, ingestion outcomes, publication failures and backlog.
-Allow two scrape intervals for rates to appear. Stop just monitoring with
-`task monitoring-down`; its named volumes preserve local history.
+The dashboard covers scrape health, HTTP errors/latency, ingestion outcomes,
+publication failures and backlog.
 
 The profile scrapes host processes through `host.docker.internal` at ports
 8000/9101/9102. If ports change, update `monitoring/prometheus.yml` too. A down
