@@ -41,10 +41,41 @@ def test_outbox_upgrade_and_downgrade_preserve_existing_history(
             """),
                 {"id": event_id, "shipment_id": shipment_id},
             )
+        command.upgrade(config, "9c8d7e6f5a4b")
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO outbox_events (id, event_id, shipment_id, message_type,
+                    payload, created_at, next_attempt_at)
+                VALUES (:id, :event_id, :shipment_id, 'shipment.event.recorded.v1',
+                    '{}', now(), now())
+            """),
+                {"id": uuid4(), "event_id": event_id, "shipment_id": shipment_id},
+            )
         command.upgrade(config, "head")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT count(*) FROM outbox_events")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM outbox_events")) == 1
+            assert (
+                connection.scalar(text("SELECT correlation_id FROM outbox_events"))
+                is None
+            )
             assert connection.scalar(text("SELECT count(*) FROM shipment_events")) == 1
+        command.downgrade(config, "9c8d7e6f5a4b")
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM outbox_events")) == 1
+            columns = (
+                connection.execute(
+                    text("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = :schema AND table_name = 'outbox_events'
+            """),
+                    {"schema": schema},
+                )
+                .scalars()
+                .all()
+            )
+            assert "correlation_id" not in columns
+        command.upgrade(config, "head")
         command.downgrade(config, "8b7c3d2e1f0a")
         with engine.connect() as connection:
             assert (

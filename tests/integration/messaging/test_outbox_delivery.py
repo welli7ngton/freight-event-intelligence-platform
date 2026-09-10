@@ -51,11 +51,12 @@ def outbound(rabbitmq_url):
         connection.close()
 
 
-def seed(session):
+def seed(session, correlation_id=None):
     shipment = CreateShipment(
         SQLAlchemyShipmentRepository(session),
         SQLAlchemyShipmentEventRepository(session),
         SQLAlchemyOutboxRepository(session),
+        correlation_id=correlation_id,
     ).execute(CreateShipmentInput("OUTBOX-BROKER", "Fortaleza", "Recife", "Carrier A"))
     session.commit()
     return shipment
@@ -117,7 +118,7 @@ def test_confirmed_publish_then_commit_failure_republishes_identical_body(
     db_session, integration_engine, outbound
 ):
     publisher, channel, exchange, queue = outbound
-    seed(db_session)
+    seed(db_session, correlation_id="stable-after-restart")
 
     class FailingCommit(Session):
         pass
@@ -141,7 +142,44 @@ def test_confirmed_publish_then_commit_failure_republishes_identical_body(
     second = channel.basic_get(queue=queue, auto_ack=True)
     assert first[0] is not None and second[0] is not None
     assert first[1].message_id == second[1].message_id
+    assert first[1].correlation_id == second[1].correlation_id == "stable-after-restart"
     assert first[2] == second[2]
+
+
+def test_http_correlation_survives_persistence_and_real_publication(
+    db_session,
+    integration_engine,
+    outbound,
+    monkeypatch,
+):
+    from app.api import dependencies
+    from app.api.application import create_application
+    from fastapi.testclient import TestClient
+
+    factory = sessionmaker(integration_engine, expire_on_commit=False, autoflush=False)
+    monkeypatch.setattr(dependencies, "SessionLocal", factory)
+    with TestClient(create_application()) as client:
+        response = client.post(
+            "/shipments",
+            headers={"X-Correlation-ID": "http-to-broker"},
+            json={
+                "reference_number": "CORRELATED",
+                "origin": "A",
+                "destination": "B",
+                "carrier": "C",
+            },
+        )
+    assert response.status_code == 201
+    assert response.headers["x-correlation-id"] == "http-to-broker"
+    with Session(integration_engine) as observer:
+        assert (
+            observer.scalar(select(OutboxEventModel)).correlation_id == "http-to-broker"
+        )
+    publisher, channel, exchange, queue = outbound
+    assert publish_one(factory, publisher, retry_delay=timedelta(seconds=5))
+    method, properties, body = channel.basic_get(queue=queue, auto_ack=True)
+    assert method is not None and properties.correlation_id == "http-to-broker"
+    assert "correlation_id" not in json.loads(body)
 
 
 def test_worker_commits_event_and_intent_before_ack_and_deduplicates(
@@ -161,6 +199,7 @@ def test_worker_commits_event_and_intent_before_ack_and_deduplicates(
             rows = observer.scalars(select(OutboxEventModel)).all()
             assert len(rows) == 1
             assert rows[0].event_id == event.event_id
+            assert rows[0].correlation_id == "ingestion-correlation"
 
     channel.basic_ack.side_effect = observe_commit
     consumer = RabbitMQShipmentEventConsumer(
@@ -172,6 +211,7 @@ def test_worker_commits_event_and_intent_before_ack_and_deduplicates(
             delivery_tag=1,
             body=message.to_json().encode(),
             handle_event=shipment_event_worker.handle_event,
+            properties=pika.BasicProperties(correlation_id="ingestion-correlation"),
         )
     assert channel.basic_ack.call_count == 2
     channel.basic_publish.assert_not_called()
