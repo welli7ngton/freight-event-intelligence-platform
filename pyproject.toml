@@ -12,6 +12,7 @@ dependencies = [
     "alembic==1.19.2",
     "fastapi==0.141.1",
     "pika==1.3.2",
+    "prometheus-client==0.26.0",
     "psycopg[binary]==3.3.5",
     "pydantic==2.13.5",
     "python-dotenv==1.2.3",
@@ -77,6 +78,8 @@ broker-up = "docker compose up -d rabbitmq"
 broker-down = "docker compose stop rabbitmq"
 worker = "python -m app.workers.shipment_event_worker"
 outbox-worker = "python -m app.workers.outbox_worker"
+monitoring-up = "docker compose --profile monitoring up -d prometheus grafana"
+monitoring-down = "docker compose --profile monitoring stop prometheus grafana"
 db-down = "docker compose down"
 db-logs = "docker compose logs -f postgres"
 db-migrate = "alembic upgrade head"
