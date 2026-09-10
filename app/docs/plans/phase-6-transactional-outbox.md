@@ -1,9 +1,13 @@
 # Phase 6 — Transactional Outbox implementation plan
 
-- Status: Proposed — awaiting user approval; implementation has not started.
+- Status: Implemented; baseline validated on 2026-09-10 (65 default and 29 integration tests).
 - Prepared: 2026-09-10.
 - Scope: durable publication intent and recoverable outbound publication.
 - Related: [current context](../context.md), ADR-003 through ADR-007.
+
+This document preserves the original approved implementation proposal below.
+ADR-008 records the accepted decision. Phase 7 adds transport correlation and
+observability; see ADR-009 and technical context for current validation.
 
 ## 1. Problem and expected outcome
 

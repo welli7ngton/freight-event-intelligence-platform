@@ -36,13 +36,15 @@ behavior. This file applies throughout the repository.
 - [ADR-006](app/docs/adr/006-RabbitMQ-Asynchronous-Ingestion.md): RabbitMQ
   ingestion and the synchronous HTTP contract.
 - [ADR-007](app/docs/adr/007-RabbitMQ-Failure-Recovery.md): retries and DLQ.
+- [ADR-008](app/docs/adr/008-Transactional-Outbox.md): atomic publication intent and relay.
+- [ADR-009](app/docs/adr/009-Observability.md): logs, correlation, and metrics.
 - `pyproject.toml`, `.env.example`, `docker-compose.yml`, and `alembic/`:
   executable configuration, dependencies, commands, and schema evolution.
 
 Documentation records current behavior alongside the historical context of ADRs.
 Verify behavior against code and tests; preserve accepted decisions unless a
 change is justified. Later ADRs refine earlier decisions. Current capabilities
-extend through Phase 5, with Phase 6 Transactional Outbox planned. Do not treat
+extend through Phase 7, including Transactional Outbox and observability. Do not treat
 a phase label as proof of complete production guarantees or test coverage.
 Use dated validation in `app/docs/context.md` and rerun relevant checks.
 
@@ -139,12 +141,20 @@ rules. Keep domain handlers free of external side effects.
   confirmed durable delivery. Preserve commit-before-ACK in worker callbacks.
 - Delivery is not exactly once. A publish/ACK interruption can cause redelivery;
   maintain idempotency and test relevant failure paths.
-- The HTTP API does not automatically publish accepted events. Transactional
-  Outbox is planned to make publication intent atomic with database changes.
-  Write an ADR before implementing it; account for recovery and duplicate
-  publication. Do not add an unprotected database-commit/broker-publish flow.
-- Redis, structured logging, Prometheus, Grafana, full replay, and dedicated
-  `processed_events`/`outbox_events` tables are not current capabilities.
+- HTTP and ingestion record one outbox intent per newly stored event, including
+  creation and late events, in the same transaction. No historical backfill.
+  The relay publishes `shipment.event.recorded.v1` to separate outbound topology
+  with confirms, mandatory routing and bounded I/O, then commits published_at.
+  Duplicate publication remains possible. Do not add direct HTTP broker writes.
+- Keep correlation in transport metadata, outside domain events. Persist it in
+  outbox_events and preserve it through AMQP retries/DLQ. Existing v1 bodies stay
+  unchanged. JSON logs allowlist fields and exclude raw errors, URLs and payloads.
+- Metrics use bounded labels, never event/shipment/correlation IDs. Each process
+  has its own scrape endpoint. Broker confirms and committed publication counts
+  are distinct; failed backlog collection must not report a healthy empty queue.
+- Redis, full replay, dedicated `processed_events`, distributed tracing and
+  centralized log storage are not current capabilities. Prometheus/Grafana are
+  available through an optional local Compose profile.
   Introduce future infrastructure only for an explicit requirement. Avoid
   premature microservices, Kafka, Kubernetes, full CQRS, or Event Sourcing.
 
@@ -171,6 +181,8 @@ unavailable, invoke executables from `.venv\Scripts\` directly.
 | `task api` | Start FastAPI with reload at `http://127.0.0.1:8000` |
 | `task broker-up` | Start RabbitMQ |
 | `task worker` | Run the ingestion worker |
+| `task outbox-worker` | Run the confirmed outbound relay |
+| `task monitoring-up` / `task monitoring-down` | Start/stop optional monitoring |
 | `task db-migrate` | Apply migrations through head |
 | `task db-current` / `task db-history` | Inspect migrations |
 | `task db-revision -- "description"` | Generate a migration for review |

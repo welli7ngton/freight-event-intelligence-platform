@@ -7,13 +7,13 @@
 ## 1. Estado atual
 
 O monólito modular possui domínio, aplicação, FastAPI, persistência PostgreSQL,
-migrations Alembic, ingestão RabbitMQ, retries limitados e DLQ. As capacidades
-das Fases 2.5 a 5 estão implementadas; isso não significa cobertura completa
-de todas as falhas de produção. A próxima evolução planejada é a
-**Fase 6 — Transactional Outbox**, seguida de observabilidade na Fase 7.
+migrations Alembic, ingestão RabbitMQ, retries limitados, DLQ, Transactional
+Outbox e observabilidade (Fases 6 e 7). Isso não significa cobertura completa
+de todas as falhas de produção. Logs JSON, correlation IDs e métricas estão
+nos processos; Prometheus/Grafana são opcionais no Compose local.
 
-Não existem Outbox, tabela de Inbox/processed_events, Redis, replay completo,
-logging estruturado, Prometheus ou Grafana.
+Não existem Inbox/processed_events, Redis, replay completo, tracing distribuído,
+agregação central de logs ou entrega de alertas de produção.
 
 ## 2. Estrutura e dependências
 
@@ -26,8 +26,11 @@ logging estruturado, Prometheus ou Grafana.
 | `app/api/` | FastAPI, rotas, schemas Pydantic e dependências |
 | `app/infra/database/` | SQLAlchemy, models, mappers, repositories e sessão |
 | `app/infra/messaging/` | RabbitMQ e classificação de falhas |
+| `app/infra/observability/` | Contexto, logs JSON, métricas e backlog |
 | `app/infra/config.py` | Configuração por ambiente e carregamento de .env |
 | `app/workers/shipment_event_worker.py` | Montagem do consumer e transação por evento |
+| `app/workers/outbox_worker.py` | Relay confirmado e endpoint de métricas |
+| `monitoring/` | Prometheus e provisioning do Grafana |
 | `alembic/versions/` | Evolução do schema |
 | `tests/` | Testes de domínio, aplicação, API, infraestrutura e integração |
 
@@ -87,12 +90,16 @@ O handler não persiste, não deduplica, não controla transações e não publi
 
 Ports: `ShipmentRepository` oferece `get/save`;
 `ShipmentEventRepository`, `exists/save/list_by_shipment`;
-`ShipmentEventPublisher`, `publish`.
+`ShipmentEventPublisher`, `publish`; `OutboxRepository` registra e seleciona
+intents; `RecordedEventPublisher` publica notificações de fatos registrados.
 
 `CreateShipment` gera UUID e horário UTC, cria entidade e evento histórico
 `SHIPMENT_CREATED` com `source = platform`, e salva ambos.
 `Shipment.created_at == creation_event.occurred_at`.
-O evento não representa uma transição `CREATED -> CREATED`.
+O evento não representa uma transição `CREATED -> CREATED`. Criação e ingestão
+também registram um intent de publicação na mesma transação, com correlation ID
+opcional passado explicitamente pelos adapters. O domínio não recebe metadados
+de observabilidade.
 
 `ReceiveShipmentEvent` rejeita criação externa, carrega a shipment, verifica
 `event_id`, chama o handler, registra o resultado por `dataclasses.replace`
@@ -102,6 +109,7 @@ reaplicar o evento. Não há comparação de payloads para IDs repetidos.
 | Endpoint | Comportamento |
 | --- | --- |
 | `GET /health` | 200 com `{"status": "ok"}`; não verifica banco/broker |
+| `GET /metrics` | Métricas Prometheus do processo da API |
 | `POST /shipments` | 201 com ShipmentResponse; única criação pública |
 | `GET /shipments/{shipment_id}` | 200 ou 404 |
 | `GET /shipments/{shipment_id}/events` | 200, lista por occurred_at; ID inexistente retorna [] |
@@ -131,6 +139,8 @@ Migrations existentes, em ordem:
 1. `34fe2111c108`: cria shipments e shipment_events, constraints e índices.
 2. `6f8e4c7a1b2d`: adiciona localização.
 3. `8b7c3d2e1f0a`: adiciona last_lifecycle_at e processing_status.
+4. `9c8d7e6f5a4b`: adiciona outbox_events e índice parcial de pendências.
+5. `a1b2c3d4e5f6`: adiciona correlation_id nullable à outbox, sem alterar bodies.
 
 Alembic utiliza a configuração de ambiente. Revise migrations autogeradas.
 O fluxo de criação mantém entidade e histórico na mesma transação.
@@ -173,44 +183,84 @@ publisher confirms nem mandatory routing; esse retorno não comprova aceitação
 durável ou roteamento. Falhas entre publish e ACK também permitem duplicatas.
 Não se deve afirmar entrega exatamente uma vez ou ausência de perda.
 
-Queues/exchanges são duráveis e mensagens publicadas são persistentes, mas
-o serviço RabbitMQ no Compose não configura volume de dados persistente.
-O HTTP ainda não publica automaticamente: Outbox resolverá a intenção de
-publicação junto à transação de banco, sem presumir uma transação distribuída.
+O Compose configura volume RabbitMQ e identidade estável. Isso não migra dados
+de containers antigos. A limitação de confirms acima se refere ao fluxo inbound;
+o relay outbound usa confirmações e mandatory routing.
+
+### Transactional Outbox (ADR-008)
+
+Criação, eventos aplicados e atrasados produzem um intent por evento/tipo,
+independentemente de HTTP ou RabbitMQ. Duplicatas não criam outro; histórico
+anterior não é backfilled. O repository faz flush ordenado dos pais para que
+conflitos de event_id continuem surgindo antes da constraint da outbox.
+
+O relay seleciona uma linha devida com FOR UPDATE SKIP LOCKED e mantém a
+transação durante I/O limitado no broker. Publica o envelope armazenado
+`shipment.event.recorded.v1` com ID estável, confirmações e mandatory routing;
+depois grava published_at e faz commit. Falhas ficam pendentes com atraso fixo.
+Falha após confirmação e antes de commit permite republicação idêntica. Não
+há garantia de exactly-once ou ordenação por shipment. Attempts conta operações
+registradas duravelmente, não todas as tentativas interrompidas.
+
+A exchange `freight.shipment-notifications` e fila
+`freight.shipment-event-notifications` são separadas da ingestão. Sem consumidor
+downstream incluído. Repositories não fazem commit; limites transacionais
+existentes continuam donos do commit/rollback.
+
+### Observabilidade (ADR-009)
+
+Middleware ASGI mantém correlation ID isolado por request, inclusive nos handlers
+síncronos. X-Correlation-ID aceita 1–64 caracteres ASCII alfanuméricos, ponto,
+hífen e underscore; outros valores geram UUID. A resposta retorna o ID. Outbox
+persiste o metadado numa coluna nullable, enviado como AMQP correlation_id.
+Retries/DLQ preservam o ID. Outbox antiga usa message_id como fallback; inbound
+sem correlation usa message_id válido ou um UUID. Bodies v1 não mudam.
+
+Logs JSON usam allowlist: timestamp UTC, component, operation, outcome, duração,
+IDs disponíveis e classe de erro. Não renderizam mensagens livres, SQL, URLs,
+payloads ou strings de exceção. Bibliotecas perdem detalhes da mensagem; logger,
+nível e classe de erro continuam disponíveis.
+
+API /metrics e workers 9101/9102 possuem registries de processo. Labels limitados
+usam templates de rota, método normalizado, status e outcomes; nunca IDs.
+Counters resetam no restart e contam observações, não eventos únicos.
+`broker_confirmed` não significa `published_committed`. Ingestion `committed`
+inclui duplicatas bem-sucedidas; `publish_returned` de retry/DLQ não é confirmação.
+
+Backlog é consultado em sessão independente com pool pequeno, connect timeout e
+statement timeout; conta também retries futuros. Falha emite collection_success=0
+e omite gauges, sem inventar fila vazia. Use max, não sum, ao agregar backlog de
+vários relays. Um processo por target/porta; multiprocess Uvicorn não é agregado.
+Monitoring profile opcional fornece Prometheus e dashboard Grafana local.
 
 ## 9. Testes e validação
 
-Em 2026-09-10, executado:
+Validação executada em 2026-09-10:
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
-```
+- Baseline da Fase 6: 65 testes default e 29 de integração passaram. O gate
+  inicial encontrou formatação em recorded_event_message.py, corrigida nesta fase.
+- `task check`: formatação, lint e **79 testes default passaram**; 32 testes de
+  integração excluídos por configuração. `task compile` passou.
+- Integração PostgreSQL/RabbitMQ: **32 passaram**, carregando `.env` antes da
+  coleta e usando exclusivamente `freight_events_test` e recursos isolados.
+- Migration revalidada após ampliar cobertura: upgrade/downgrade da coluna de
+  correlação preserva outbox populada; downgrade da outbox preserva histórico.
+- `docker compose --profile monitoring config --quiet` e `promtool check config`
+  passaram. Grafana carregou o dashboard provisionado com 10 painéis.
+- Smoke com entry points reais, banco de testes e filas isoladas: três targets
+  Prometheus UP, correlation header na API e coleta de backlog saudável. Processos
+  temporários foram encerrados e recursos de broker do smoke removidos.
 
-Resultado: **49 passed, 13 deselected**, com uma advertência de depreciação
-Starlette/AnyIO. Os 13 testes de integração foram coletados, mas não executados
-nesta revisão documental; contagem coletada não comprova integração passando.
+Cobertura inclui rollback após flush, corrida HTTP concorrente real, locks de
+relay, confirmação seguida de falha de commit, republicação com identidade/body
+e correlation ID estáveis, 422 para criação externa, commit antes de ACK no
+callback de produção, deadlines de broker, isolamento de contextos concorrentes,
+logs sem strings sensíveis, métricas de falha e propagação HTTP → banco → broker.
 
-`task check` interrompeu na verificação de formatação de `alembic/env.py`.
-Uma execução separada de Ruff também identificou I001 nesse arquivo (ordem de
-imports). São problemas preexistentes, fora da atualização documental; não há
-afirmação de que o gate completo de qualidade passou.
-
-Cobertura disponível:
-
-- Domínio/aplicação: criação, transições, duplicatas sequenciais, eventos
-  atrasados, clocks independentes e rejeição de SHIPMENT_CREATED.
-- API: health, criação/consulta, recebimento e recuperação de conflito simulado.
-- PostgreSQL: repositories, constraints, HTTP integrado, retenção de evento
-  atrasado, rollback e corrida com duas sessões.
-- Messaging: round-trip versionado, publisher/consumer com doubles,
-  classificação, retry e esgotamento; integração com broker para ingestão e DLQ.
-
-Limites de cobertura: não há teste HTTP dedicado de 422 para SHIPMENT_CREATED,
-nem corrida HTTP concorrente real (a rota usa conflito simulado no teste).
-O teste de ingestão RabbitMQ integrado chama o use case diretamente e faz
-commit depois de process_delivery; ele não comprova a ordem commit/ACK do
-entry point de produção. O teste de rollback injeta falha de repository antes
-de flush, não uma falha de commit após writes confirmados no servidor.
+Advertências não bloqueantes: depreciações Starlette/AnyIO e constante HTTP 422;
+o sandbox também impediu escrita do cache opcional do pytest no `task check`.
+Integração foi executada com `-p no:cacheprovider`. Um conflito inicial entre
+nomes de módulos de teste foi corrigido antes da execução completa.
 
 Veja [README](../../README.md#integration-tests) para carregar URLs antes da
 coleta. O banco deve se chamar exatamente `freight_events_test`; fixtures
@@ -219,9 +269,7 @@ Não execute esses fixtures no banco de desenvolvimento.
 
 ## 10. Próximas decisões
 
-A Fase 6 precisa de um novo ADR sobre persistência atômica da intenção de
-publicação, publisher recuperável e duplicatas. Não existe ainda ADR de Outbox.
-Considere também confirms/routing, persistência do broker e testes de falhas
-antes de declarar garantias de produção. A Fase 7 prevê logs estruturados,
-correlation IDs e observabilidade. Adicione complexidade apenas para requisitos
-concretos, preservando as camadas existentes.
+ADR-008 e ADR-009 registram as Fases 6 e 7. Próximas decisões dependem de
+requisitos: confirms/routing no retry/DLQ inbound, retenção da outbox, alertas,
+agregação de logs ou tracing. Monitoramento não altera garantias de entrega.
+Sem migrations aplicadas ao banco de desenvolvimento nesta implementação.
