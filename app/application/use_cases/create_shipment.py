@@ -31,10 +31,13 @@ class CreateShipment:
         shipment_repository: ShipmentRepository,
         shipment_event_repository: ShipmentEventRepository,
         outbox_repository: OutboxRepository,
+        *,
+        correlation_id: str | None = None,
     ):
         self._shipment_repository = shipment_repository
         self._shipment_event_repository = shipment_event_repository
         self._outbox_repository = outbox_repository
+        self._correlation_id = correlation_id
 
     def execute(
         self,
@@ -63,6 +66,8 @@ class CreateShipment:
 
         self._shipment_repository.save(shipment)
         self._shipment_event_repository.save(event)
-        self._outbox_repository.add(RecordedEventMessage.from_event(event))
+        self._outbox_repository.add(
+            RecordedEventMessage.from_event(event, correlation_id=self._correlation_id)
+        )
 
         return shipment

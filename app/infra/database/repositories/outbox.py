@@ -44,6 +44,7 @@ class SQLAlchemyOutboxRepository:
                 created_at=now,
                 next_attempt_at=now,
                 attempts=0,
+                correlation_id=message.correlation_id,
             )
         )
 
@@ -69,6 +70,7 @@ class SQLAlchemyOutboxRepository:
             event_id=model.event_id,
             shipment_id=model.shipment_id,
             body=json.dumps(model.payload, sort_keys=True, separators=(",", ":")),
+            correlation_id=model.correlation_id or str(model.id),
         )
 
     def mark_published(self, message_id: UUID, now: datetime) -> None:

@@ -15,11 +15,16 @@ class RecordedEventMessage:
     event_id: UUID
     shipment_id: UUID
     body: str
+    correlation_id: str | None = None
 
     @classmethod
-    def from_event(cls, event: ShipmentEvent) -> "RecordedEventMessage":
+    def from_event(
+        cls, event: ShipmentEvent, *, correlation_id: str | None = None
+    ) -> "RecordedEventMessage":
         message_id = uuid4()
-        payload = asdict(event.payload) if is_dataclass(event.payload) else event.payload
+        payload = (
+            asdict(event.payload) if is_dataclass(event.payload) else event.payload
+        )
         if not isinstance(payload, dict):
             raise ValueError("Recorded-event payload must be an object")
         envelope = {
@@ -40,4 +45,5 @@ class RecordedEventMessage:
             event_id=event.event_id,
             shipment_id=event.shipment_id,
             body=json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+            correlation_id=correlation_id,
         )

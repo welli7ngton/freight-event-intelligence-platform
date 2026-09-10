@@ -21,11 +21,14 @@ class ReceiveShipmentEvent:
         shipment_event_repository: ShipmentEventRepository,
         event_handler: ShipmentEventHandler,
         outbox_repository: OutboxRepository,
+        *,
+        correlation_id: str | None = None,
     ):
         self._shipment_repository = shipment_repository
         self._shipment_event_repository = shipment_event_repository
         self._event_handler = event_handler
         self._outbox_repository = outbox_repository
+        self._correlation_id = correlation_id
 
     def execute(
         self,
@@ -51,7 +54,11 @@ class ReceiveShipmentEvent:
 
         self._shipment_event_repository.save(recorded_event)
         self._shipment_repository.save(shipment)
-        self._outbox_repository.add(RecordedEventMessage.from_event(recorded_event))
+        self._outbox_repository.add(
+            RecordedEventMessage.from_event(
+                recorded_event, correlation_id=self._correlation_id
+            )
+        )
 
         return shipment
 

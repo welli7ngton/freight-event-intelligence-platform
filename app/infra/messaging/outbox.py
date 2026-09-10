@@ -119,6 +119,8 @@ class _Publication:
                 content_type="application/json",
                 delivery_mode=pika.DeliveryMode.Persistent,
                 message_id=str(self.message.message_id),
+                correlation_id=self.message.correlation_id
+                or str(self.message.message_id),
                 type=EVENT_RECORDED_ROUTING_KEY,
             ),
         )

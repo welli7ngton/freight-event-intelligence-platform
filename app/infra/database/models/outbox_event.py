@@ -33,6 +33,7 @@ class OutboxEventModel(Base):
     attempts: Mapped[int] = mapped_column(nullable=False, server_default="0")
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(100))
+    correlation_id: Mapped[str | None] = mapped_column(String(64))
 
 
 Index(
