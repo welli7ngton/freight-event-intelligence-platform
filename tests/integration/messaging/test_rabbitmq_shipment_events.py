@@ -8,6 +8,7 @@ from app.application.use_cases.receive_shipment_events import ReceiveShipmentEve
 from app.domain.shipment.event_handler import ShipmentEventHandler
 from app.domain.shipment.events import ShipmentEventType
 from app.infra.database.repositories.event import SQLAlchemyShipmentEventRepository
+from app.infra.database.repositories.outbox import SQLAlchemyOutboxRepository
 from app.infra.database.repositories.shipment import SQLAlchemyShipmentRepository
 from app.infra.messaging.rabbitmq import (
     RabbitMQShipmentEventConsumer,
@@ -56,6 +57,7 @@ def test_rabbitmq_message_reaches_receive_shipment_event_use_case(
         use_case = ReceiveShipmentEvent(
             shipment_repository=shipment_repository,
             shipment_event_repository=event_repository,
+            outbox_repository=SQLAlchemyOutboxRepository(db_session),
             event_handler=ShipmentEventHandler(),
         )
         consumer = RabbitMQShipmentEventConsumer(

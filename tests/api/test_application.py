@@ -9,6 +9,7 @@ from app.application.use_cases.create_shipment import (
 )
 from app.domain.shipment.events import ShipmentEventType
 from sqlalchemy.exc import IntegrityError
+from tests.factories.repositories import InMemoryOutboxRepository
 from tests.factories.shipment import make_shipment
 
 
@@ -212,6 +213,7 @@ def test_create_shipment_generates_identity_timestamps_and_creation_event(
     use_case = CreateShipment(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
+        outbox_repository=InMemoryOutboxRepository(),
     )
 
     shipment = use_case.execute(

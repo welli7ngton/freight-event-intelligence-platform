@@ -13,6 +13,7 @@ from app.application.use_cases.get_shipment_events import GetShipmentEvents
 from app.application.use_cases.receive_shipment_events import ReceiveShipmentEvent
 from app.domain.shipment.event_handler import ShipmentEventHandler
 from fastapi.testclient import TestClient
+from tests.factories.repositories import InMemoryOutboxRepository
 
 
 class InMemoryTransaction:
@@ -30,6 +31,7 @@ def repositories(in_memory_repositories):
     app.dependency_overrides[get_create_shipment_use_case] = lambda: CreateShipment(
         shipment_repository,
         event_repository,
+        InMemoryOutboxRepository(),
     )
     app.dependency_overrides[get_get_shipment_use_case] = lambda: GetShipment(
         shipment_repository,
@@ -41,6 +43,7 @@ def repositories(in_memory_repositories):
         lambda: ReceiveShipmentEvent(
             shipment_repository=shipment_repository,
             shipment_event_repository=event_repository,
+            outbox_repository=InMemoryOutboxRepository(),
             event_handler=ShipmentEventHandler(),
         )
     )

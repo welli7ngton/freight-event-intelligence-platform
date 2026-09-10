@@ -8,6 +8,7 @@ from app.domain.shipment.event_handler import ShipmentEventHandler
 from app.domain.shipment.events import ShipmentEvent
 from app.domain.shipment.state_machine import ShipmentStatus
 from app.infra.database.repositories.event import SQLAlchemyShipmentEventRepository
+from app.infra.database.repositories.outbox import SQLAlchemyOutboxRepository
 from app.infra.database.repositories.shipment import SQLAlchemyShipmentRepository
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -46,6 +47,7 @@ def test_same_event_processed_concurrently_hits_unique_constraint(
             use_case = ReceiveShipmentEvent(
                 shipment_repository=SQLAlchemyShipmentRepository(session),
                 shipment_event_repository=SQLAlchemyShipmentEventRepository(session),
+                outbox_repository=SQLAlchemyOutboxRepository(session),
                 event_handler=BarrierShipmentEventHandler(barrier),
             )
             try:

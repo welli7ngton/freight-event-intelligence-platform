@@ -91,7 +91,9 @@ def db_session(integration_engine: Engine) -> Generator[Session, None, None]:
 
     with integration_engine.begin() as connection:
         connection.execute(
-            text("TRUNCATE TABLE shipment_events, shipments RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE TABLE outbox_events, shipment_events, shipments RESTART IDENTITY CASCADE"
+            )
         )
 
 

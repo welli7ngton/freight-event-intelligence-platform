@@ -12,6 +12,7 @@ from app.domain.shipment.event_handler import ShipmentEventHandler
 from app.domain.shipment.events import ShipmentEventProcessingStatus, ShipmentEventType
 from app.domain.shipment.exceptions import InvalidShipmentEvent
 from app.domain.shipment.state_machine import ShipmentStatus
+from tests.factories.repositories import InMemoryOutboxRepository
 from tests.factories.shipment import make_event, make_shipment
 
 
@@ -19,7 +20,9 @@ def test_create_shipment_generates_identity_and_timestamps(
     in_memory_repositories,
 ) -> None:
     shipment_repository, shipment_event_repository = in_memory_repositories
-    use_case = CreateShipment(shipment_repository, shipment_event_repository)
+    use_case = CreateShipment(
+        shipment_repository, shipment_event_repository, InMemoryOutboxRepository()
+    )
 
     shipment = use_case.execute(
         CreateShipmentInput(
@@ -48,6 +51,7 @@ def test_receive_shipment_event_updates_and_persists_shipment(
     result = ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
+        outbox_repository=InMemoryOutboxRepository(),
         event_handler=ShipmentEventHandler(),
     ).execute(event)
 
@@ -65,6 +69,7 @@ def test_receive_shipment_event_is_idempotent(in_memory_repositories) -> None:
     use_case = ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
+        outbox_repository=InMemoryOutboxRepository(),
         event_handler=ShipmentEventHandler(),
     )
 
@@ -85,6 +90,7 @@ def test_receive_late_event_persists_history_without_changing_projection(
     use_case = ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
+        outbox_repository=InMemoryOutboxRepository(),
         event_handler=ShipmentEventHandler(),
     )
     use_case.execute(
@@ -120,6 +126,7 @@ def test_receive_shipment_created_event_is_rejected_before_processing(
     use_case = ReceiveShipmentEvent(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
+        outbox_repository=InMemoryOutboxRepository(),
         event_handler=handler,
     )
 
@@ -155,6 +162,7 @@ def test_create_shipment_persists_shipment_and_creation_event(
     use_case = CreateShipment(
         shipment_repository=shipment_repository,
         shipment_event_repository=event_repository,
+        outbox_repository=InMemoryOutboxRepository(),
     )
 
     shipment = use_case.execute(
