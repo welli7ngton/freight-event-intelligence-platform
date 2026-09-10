@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-09
+- Reviewed: 2026-09-10
 - Related: ADR-006
 
 ## Context
@@ -26,12 +27,24 @@ the default is three. Exhausted retryable messages go to the DLQ.
 
 The original message body is never changed. Retry/DLQ publications retain and
 extend headers with `x-attempt-count`, first-failure time, and the latest error
-type and message. The worker ACKs the original delivery only after it has
-successfully republished it to retry or DLQ.
+type and message. The exact headers are `x-attempt-count`,
+`x-first-failed-at`, `x-last-error-type`, and `x-last-error-message`; the
+error message is truncated to 500 characters. The worker ACKs the original
+delivery after the retry/DLQ `basic_publish` call returns. The call does not
+use publisher confirms or mandatory routing, so this is not confirmation of
+durable broker acceptance or routing.
 
 ## Consequences
 
-Transient failures receive bounded retries rather than being silently lost.
-Permanent failures and exhausted retries remain inspectable in the DLQ. This is
-not exactly-once delivery: a publish/ACK interruption can still redeliver a
-message, so consumers continue relying on `event_id` idempotency.
+Transient failures are routed toward bounded retries; permanent and exhausted
+failures are routed toward the DLQ for inspection. Without publisher confirms
+and routing checks, this implementation does not guarantee loss-free handoff.
+A publish/ACK interruption can also cause redelivery, so consumers continue
+relying on `event_id` idempotency. The Compose RabbitMQ service has no persistent
+volume; durable flags alone do not survive removal of its container.
+
+Unit tests cover retry metadata, exhaustion, invalid-message DLQ routing, and
+classification of invalid transitions. A broker integration test checks that
+an invalid body is preserved in the DLQ. There is no integrated test for TTL
+redelivery followed by success or a broker failure during publish/ACK.
+See [technical context](../context.md) for dated validation.

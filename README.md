@@ -2,14 +2,14 @@
 
 An event-driven backend for receiving and processing freight-shipment lifecycle
 events. The project is a Python modular monolith used to explore DDD, layered
-architecture, persistence, and a future move toward asynchronous processing.
+architecture, persistence, and asynchronous processing through RabbitMQ.
 
 ## Current status
 
-The domain, application layer, SQLAlchemy persistence, Alembic migrations, and
-FastAPI API are implemented. Phase 2.5 validated persistence against a real,
-isolated PostgreSQL database. Phase 2.6 reproduced the current concurrent
-idempotency limitation and documented the chosen Phase 3 strategy.
+The domain, application layer, SQLAlchemy persistence, Alembic migrations,
+FastAPI API, RabbitMQ ingestion, and bounded retry/DLQ handling are implemented.
+The next planned capability is Phase 6 Transactional Outbox. See
+[technical context](app/docs/context.md) for behavior, validation, and limitations.
 
 Implemented capabilities include:
 
@@ -36,8 +36,8 @@ app/
 ├── api/                  # FastAPI routes, schemas, and dependencies
 ├── application/          # Use cases and repository ports
 ├── domain/               # Entities, events, and business rules
-├── infra/database/       # SQLAlchemy models, mappers, repositories, session
-└── workers/              # Reserved for future asynchronous processing
+├── infra/                # Database, RabbitMQ adapters, and configuration
+└── workers/              # RabbitMQ ingestion entry point
 
 alembic/                  # Database migrations
 tests/                    # Unit and integration tests
@@ -62,12 +62,14 @@ In PowerShell:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-Copy-Item .env-example .env
+# Only if .env does not already exist:
+Copy-Item .env.example .env
 ```
 
 Configure `.env` with the credentials and URLs for the target environment. It
-is ignored by Git; `.env-example` documents every required setting without
-containing a usable secret.
+is ignored by Git; `.env.example` contains local example values to replace.
+`DATABASE_URL` and `RABBITMQ_URL` are required by their respective adapters;
+application configuration loads `.env` using python-dotenv.
 
 Start PostgreSQL and apply migrations:
 
@@ -91,6 +93,9 @@ The API is available at `http://127.0.0.1:8000`.
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - ReDoc: `http://127.0.0.1:8000/redoc`
 - Health check: `GET /health`
+
+The health endpoint returns a static response; it does not check database or
+broker readiness.
 
 ## Endpoints
 
@@ -129,7 +134,8 @@ Returns `404` when the shipment does not exist.
 GET /shipments/{shipment_id}/events
 ```
 
-Returns the event history ordered by `occurred_at`.
+Returns the event history ordered by `occurred_at`, including each event's
+`processing_status`. An unknown shipment ID returns an empty list.
 
 ### Receive an event
 
@@ -149,7 +155,8 @@ Content-Type: application/json
 }
 ```
 
-This endpoint accepts operational lifecycle events for an existing shipment.
+This endpoint processes operational lifecycle events synchronously for an existing
+shipment and returns its projection with HTTP 200. It does not publish to RabbitMQ.
 `SHIPMENT_CREATED` is rejected with `422`; it is historical creation metadata,
 not a state-machine transition. `LOCATION_UPDATED` requires numeric `latitude`
 and `longitude` values in `payload`. Invalid transitions return `409`; an
@@ -176,8 +183,12 @@ Every valid event is retained in shipment history. `processing_status` is
 `APPLIED` when it updates the current projection and `STORED_OUT_OF_ORDER` when
 it is retained only as historical evidence. Location and lifecycle timelines
 are evaluated independently: late locations cannot overwrite newer coordinates,
-and late lifecycle events cannot move current status backward. This domain
-policy is independent of Kafka and will be reused by a future worker.
+and late lifecycle events do not alter current status. Strictly older lifecycle
+events are classified before checking the current-state transition; equal
+timestamps follow normal processing. This retains history without replay or
+validation against reconstructed historical state. The HTTP API and RabbitMQ
+worker reuse this policy. `updated_at` reflects the last applied event's
+occurrence time and is not a global monotonic watermark.
 
 ## Tests and quality
 
@@ -185,7 +196,7 @@ policy is independent of Kafka and will be reused by a future worker.
 task test-fast          # concise unit-test output
 task test               # default suite; integration tests are excluded
 task test-api           # API-layer tests
-task test-integration   # isolated PostgreSQL integration tests
+task test-integration   # PostgreSQL and RabbitMQ integration tests
 task lint               # Ruff lint
 task lint-fix           # apply Ruff lint fixes
 task format             # format with Ruff
@@ -202,17 +213,24 @@ task check
 
 ### Integration tests
 
-Integration tests exclusively use `freight_events_test` in the `postgres-test`
-service on port `5433`; they never use the development database. Start the
-service and run the tests as follows:
+Database integration tests exclusively use `freight_events_test` in the
+`postgres-test` service on port `5433`; fixtures apply migrations and clean
+tables. The integration marker also includes RabbitMQ tests. Configure URLs
+before pytest imports its fixtures:
 
 ```powershell
-docker compose up -d postgres-test
-task test-integration
+docker compose up -d postgres-test rabbitmq
+python -c "from dotenv import load_dotenv; load_dotenv(); import pytest; raise SystemExit(pytest.main(['-m', 'integration']))"
 ```
 
-Set `TEST_DATABASE_URL` to use another test URL. For safety, it must point to a
-database named exactly `freight_events_test`.
+The command above loads `.env` before test collection. Alternatively export
+`TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` in the process environment and run
+`task test-integration`. The database must be named exactly
+`freight_events_test`. Tests otherwise default to a local PostgreSQL URL with
+password `postgres`, which differs from `.env.example`, and a local RabbitMQ
+URL. Run PostgreSQL-only coverage with
+`python -m pytest -m integration tests/integration/database tests/integration/api tests/infra/database`
+after exporting the test database URL.
 
 ## Database and migrations
 
@@ -243,7 +261,12 @@ post-commit publication requires the Transactional Outbox planned for Phase 6.
 Retryable processing failures are sent to a retry queue and return to the main
 queue after `RABBITMQ_RETRY_DELAY_MS`. After `RABBITMQ_MAX_ATTEMPTS`, or for
 invalid messages and business-rule failures, the original message is stored in
-the dead-letter queue with attempt and failure metadata.
+the dead-letter queue with attempt and failure metadata. The original delivery
+is ACKed after the republish call returns. Publisher confirms and mandatory
+routing are not enabled, so return from that call is not proof of broker
+acceptance or routing. Start the worker to declare its queues before publishing.
+The Compose RabbitMQ service has no persistent data volume; durable queue and
+message flags alone do not preserve broker data after container removal.
 
 Start the broker and worker with:
 
@@ -266,6 +289,13 @@ Architecture decisions are recorded in [app/docs/adr](app/docs/adr):
 
 ## Next steps
 
-1. Implement Phase 3A: turn a concurrent unique-constraint conflict into a
-   defined idempotent API outcome.
-2. Add Transactional Outbox before publishing accepted API events.
+1. Record the Transactional Outbox design in a new ADR, then persist publication
+   intent atomically with shipment/event changes and add a recoverable publisher.
+2. Strengthen broker delivery guarantees and failure-path coverage: current
+   `basic_publish` calls do not enable publisher confirms or mandatory routing.
+3. Add structured logging, correlation IDs, metrics, and dashboards in Phase 7.
+
+Concurrent HTTP duplicates already recover by rolling back a
+`shipment_events_pkey` collision and reloading the persisted shipment. The
+worker relies on retries and sequential deduplication instead of that HTTP
+recovery path. Neither mechanism serializes distinct events for a shipment.

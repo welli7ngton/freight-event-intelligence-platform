@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-05
+- Reviewed: 2026-09-10; later refinements are identified below.
 - Decision: Implement the Core Domain as an infrastructure-independent component, using a `Shipment` entity, an immutable `ShipmentEvent` entity, and an explicit State Machine to control state transitions.
 
 ## 1. Context
@@ -22,6 +23,7 @@ The Core Domain is an infrastructure-independent component:
 app/domain/shipment/
     entities.py
     events.py
+    event_handler.py
     state_machine.py
     exceptions.py
 ```
@@ -32,11 +34,17 @@ Tests are separate under `tests/domain/shipment/`. `Shipment` represents the ent
 
 `Shipment` is the main domain entity. Its initial model contains `id`, `reference_number`, `origin`, `destination`, `carrier`, `status`, `created_at`, and `updated_at`. It starts in `CREATED` and is constructed via `Shipment.create(...)`, so external code need not know initialization details.
 
-State changes occur through `shipment.apply_event(event)`, not arbitrary assignments such as `shipment.status = ShipmentStatus.DELIVERED`. This concentrates business rules inside the domain.
+State changes are coordinated by `ShipmentEventHandler.handle(shipment, event)`
+through `shipment.change_status(event_type, occurred_at)`. Location changes use
+`shipment.update_location(payload, occurred_at)`. These methods concentrate
+business rules inside the domain; there is no current `Shipment.apply_event`
+method.
 
 ## 5. ShipmentEvent
 
-`ShipmentEvent` contains `event_id`, `shipment_id`, `event_type`, `source`, `occurred_at`, `received_at`, and `payload`. It is immutable after creation, using an equivalent of:
+`ShipmentEvent` contains `event_id`, `shipment_id`, `event_type`, `source`,
+`occurred_at`, `received_at`, `payload`, and `processing_status` (added by
+ADR-005). Its fields cannot be reassigned, using:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -52,15 +60,15 @@ Immutability reflects an event's historical nature: an event that happened and w
 
 ## 7. State Machine
 
-The initial lifecycle states are `CREATED`, `SCHEDULED`, `PICKED_UP`, `IN_TRANSIT`, `DELAYED`, and `DELIVERED`:
+The lifecycle states are `CREATED`, `SCHEDULED`, `PICKED_UP`, `IN_TRANSIT`, `DELAYED`, and `DELIVERED`:
 
 ```text
 CREATED    --PICKUP_SCHEDULED--> SCHEDULED
 SCHEDULED  --PICKUP_COMPLETED--> PICKED_UP
-PICKED_UP  --LOCATION_UPDATED--> IN_TRANSIT
+PICKED_UP  --SHIPMENT_DEPARTED--> IN_TRANSIT
 IN_TRANSIT --DELAY_DETECTED--> DELAYED
 IN_TRANSIT --DELIVERED--------> DELIVERED
-DELAYED    --LOCATION_UPDATED--> IN_TRANSIT
+DELAYED    --SHIPMENT_DEPARTED--> IN_TRANSIT
 DELAYED    --DELIVERED--------> DELIVERED
 ```
 
@@ -80,7 +88,10 @@ The State Machine only determines which state may follow the current state for a
 
 ## 10. Tests
 
-Phase 1 unit tests cover valid transitions (`CREATED -> SCHEDULED`, `SCHEDULED -> PICKED_UP`, `PICKED_UP -> IN_TRANSIT`, delayed and delivered paths), invalid transitions (including transitions from `DELIVERED`), initial state, event application, `updated_at`, rejection of events for another shipment, preservation of state after an invalid transition, and event immutability.
+Unit tests cover selected valid transitions, invalid transitions (including
+transitions from `DELIVERED`), initial state, event application, `updated_at`,
+cross-shipment rejection, unchanged status after an invalid transition, and
+event field immutability. They are not an exhaustive test of every table entry.
 
 ## 11. `SHIPMENT_CREATED`
 
@@ -90,17 +101,30 @@ ADR-003 later formalizes that `POST /shipments` creates the entity and records t
 
 ## 12. State-changing and informational events
 
-Not every event must change state. `LOCATION_UPDATED` may occur repeatedly during a journey and should eventually update location without implying `IN_TRANSIT -> IN_TRANSIT`. The initial implementation simplified this behavior; the domain model must distinguish state-changing from informational events.
+Not every event changes state. `LOCATION_UPDATED` updates coordinates without
+entering the lifecycle state machine. `SHIPMENT_DEPARTED` is the event that moves
+`PICKED_UP` or `DELAYED` to `IN_TRANSIT`. ADR-002 records this refinement of the
+initial model.
 
 ## 13. Out-of-order events
 
-Out-of-order handling is deliberately unresolved. Events such as `PICKUP_COMPLETED`, `LOCATION_UPDATED`, and `DELIVERED` may arrive in reverse order. A `DELIVERED` event applied while a shipment is `CREATED` is correctly rejected by the state machine, but the application must later decide whether it is invalid or valid but premature. This policy belongs in the appropriate application/processing layer, not simply in `Shipment`.
+Out-of-order handling was unresolved in Phase 1. ADR-005 now places the policy
+in the domain handler: strictly older lifecycle or location events are retained
+as `STORED_OUT_OF_ORDER` without modifying that projection. Non-late lifecycle
+events enter the state machine. The handler does not replay history or validate
+a late transition against reconstructed historical state. Persistence and
+deduplication remain outside the domain.
 
-## 14. Decisions required before Phase 2
+## 14. Follow-up decisions now implemented
 
-Before introducing PostgreSQL, repositories, and FastAPI, the platform must define `SHIPMENT_CREATED` semantics; separate state-changing from informational events; define late/out-of-order detection, acceptance, rejection, storage, and reprocessing; define what `updated_at` represents; document Shipment invariants; confirm event identity scope; and decide duplicate-event handling.
+ADR-003 establishes atomic shipment/creation-event persistence. ADR-004 defines
+global event identity and HTTP concurrent conflict recovery. ADR-005 defines
+independent location and lifecycle timelines. ADR-006 and ADR-007 introduce
+RabbitMQ ingestion, retry classification, and DLQ.
 
-Important invariants include an immutable shipment ID, `CREATED` as the initial state, rejection of another shipment's events, no return from `DELIVERED` to an operational state, and no state change after an invalid transition. The future idempotency design must account for normal at-least-once delivery, probably following `Event Consumer -> Idempotency Check -> Shipment.apply_event()` and reinforced by the database.
+The identity association, initial state, explicit transition table, and rejection
+of invalid non-late transitions remain domain invariants. No lifecycle transition
+leaves `DELIVERED`; location handling remains separate from lifecycle transitions.
 
 ## 15. Out of scope
 
@@ -108,14 +132,16 @@ This ADR does not define PostgreSQL, SQLAlchemy, FastAPI, RabbitMQ, Redis, Outbo
 
 ## 16. Consequences
 
-Positive consequences are infrastructure independence, explicit rules, fast unit testing, lower coupling, and incremental infrastructure adoption. Costs are that the model does not yet completely define out-of-order or informational events, may require refactoring before persistence, and will need a more sophisticated state machine as rules are discovered. These costs are acceptable while the rules remain explicit and testable.
+The domain remains infrastructure-independent, with explicit rules and fast unit
+tests. Separate entities, events, and a handler add structure and mapping work,
+but allow HTTP and workers to share behavior. This does not imply Event Sourcing:
+the current projection is persisted directly and no historical replay exists.
 
-## 17. Completion criteria and next ADRs
+## 17. Validation and evolution
 
-Phase 1 is complete when Shipment, ShipmentEvent, states, State Machine, valid and invalid transition tests, event immutability, cross-shipment rejection, `SHIPMENT_CREATED` semantics, event categories, out-of-order strategy, `updated_at` semantics, Shipment invariants, global event identity, and idempotency strategy are defined.
-
-Expected follow-up ADRs include idempotency, event identity and deduplication, out-of-order events, PostgreSQL persistence, and RabbitMQ. Numbering may change as decisions are made.
-
-## 18. Summary
-
-The project begins with the domain, not infrastructure. Shipment owns its behavior, ShipmentEvent represents immutable facts, and ShipmentStateMachine explicitly defines allowed transitions. The foundation is deliberately small and testable while advanced questions—state and informational events, ordering, identity/idempotency, and timestamp semantics—are resolved before further infrastructure is added.
+Domain tests cover initial state, state-machine behavior, event field
+immutability, cross-shipment rejection, and late-event handling. The tests do
+not establish deep immutability of mutable payload objects. Current validation
+results and coverage limits are maintained in [technical context](../context.md).
+Future domain changes should refine the existing rules through tests and ADRs,
+rather than putting rules into transport or persistence adapters.

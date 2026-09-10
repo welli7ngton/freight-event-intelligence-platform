@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-06
+- Reviewed: 2026-09-10
 - Related: ADR-002 — Phase 2: API and Persistence Evolution
 
 ## 1. Context
@@ -55,7 +56,8 @@ The architecture distinguishes `occurred_at` (when the fact occurred in the doma
 Shipment.created_at == ShipmentEvent(SHIPMENT_CREATED).occurred_at
 ```
 
-This distinction remains relevant to future out-of-order-event handling and replay, but does not yet impose another business rule.
+ADR-005 now uses occurrence time for independent lifecycle/location ordering.
+Historical replay remains future work.
 
 ## 6. Layer responsibilities
 
@@ -71,10 +73,18 @@ Trade-offs are that `CreateShipment` depends on `ShipmentEventRepository` in add
 
 ## 8. Alternatives considered
 
-Requiring `POST /events` for the creation event was rejected because it would make shipment creation historically incomplete. Creating the event in the controller was rejected because it would move domain integrity into HTTP. Adding an event bus now was rejected because distributed asynchronous publication is not yet needed. Using an Outbox now was rejected because the local SQLAlchemy transaction already persists the entity and event atomically without additional infrastructure.
+Requiring `POST /events` for the creation event was rejected because it would make shipment creation historically incomplete. Creating the event in the controller was rejected because it would move domain integrity into HTTP. At the time of this decision, an event bus and Outbox were deferred because
+the local transaction was sufficient for creation consistency. RabbitMQ ingestion
+has since been added (ADR-006/007). Outbox is still planned for HTTP-originated
+publication, a separate guarantee from atomic database persistence.
 
 ## 9. Final decision
 
 Creating a `Shipment` and creating its `SHIPMENT_CREATED` event are the same business operation and transaction. `POST /shipments` remains the public creation contract; `POST /events` is for later lifecycle events only.
 
-Current tests cover joint creation, association with the correct `shipment_id`, `source`, `occurred_at`, `received_at`, rejection of `SHIPMENT_CREATED` by `ReceiveShipmentEvent` and `ShipmentEventHandler`, and rollback when event persistence fails. The validated suite has 37 passing tests. It does not yet include a dedicated HTTP 422 test for `SHIPMENT_CREATED` or a transaction test against real PostgreSQL.
+Tests cover joint creation, event identity association, source and timestamps,
+and rejection by the use case/handler. A PostgreSQL integration test now injects
+an event-repository failure and checks that rollback leaves no shipment. It
+fails before flush, so it does not demonstrate rollback after both writes have
+reached the server or a commit failure. A dedicated HTTP 422 test is still
+absent. See [technical context](../context.md) for current validation results.

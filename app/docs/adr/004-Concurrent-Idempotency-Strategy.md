@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-07
+- Reviewed: 2026-09-10
 - Related: ADR-003 — Atomic Shipment and SHIPMENT_CREATED Persistence
 
 ## Context
@@ -26,12 +27,12 @@ The observed result was:
 2. both ran the handler against their local shipment copies;
 3. one transaction committed normally;
 4. the other failed on the `shipment_events.event_id` primary-key constraint;
-5. after both commits, the database contained one event and one persisted
+5. after the transactions finished, the database contained one event and one persisted
    shipment transition.
 
-The database constraint protects persisted consistency, but the conflict reaches
-the application as an `IntegrityError`. It currently produces a technical error
-for the concurrent request rather than a contract-defined duplicate response.
+The database constraint protected uniqueness, but the original flow surfaced
+an `IntegrityError`. The HTTP route now handles the specific event identity
+collision as described below.
 
 ## Decision
 
@@ -46,7 +47,7 @@ Receive event
       ↓
 Fast sequential duplicate check
       ↓
-Process and attempt commit
+Process and flush pending writes
       ↓
 Unique-constraint conflict?
       ├── no  → processed
@@ -70,7 +71,7 @@ failures, or deduplication before event persistence.
 This provides states such as `RECEIVED`, `PROCESSING`, `PROCESSED`, and
 `FAILED`, but adds a model, migration, and abandoned-state recovery. There is
 no demonstrated need while the historical event already has a unique identity
-and processing is synchronous.
+and event/projection writes share one database transaction.
 
 ### Pessimistic lock per shipment
 
@@ -84,8 +85,9 @@ not replace the unique `event_id` constraint.
 
 ### Serialization per shipment
 
-This would require queue or coordination infrastructure that does not yet
-exist. It is premature before the planned asynchronous processing is added.
+This was deferred when the decision was made. RabbitMQ ingestion now exists,
+but does not implement per-shipment partitioning or serialization across HTTP
+requests and workers. Such coordination requires a separate demonstrated need.
 
 ## Trade-offs
 
@@ -102,5 +104,13 @@ exist. It is premature before the planned asynchronous processing is added.
 - PostgreSQL remains the final guarantee of event uniqueness.
 - The API test suite validates the defined concurrent-conflict response in
   addition to the PostgreSQL race reproduction test.
-- This ADR makes no functional change; it documents the strategy to be
-  implemented in the next phase.
+- HTTP conflict recovery is implemented. The route recognizes exactly
+  `shipment_events_pkey`, rolls back, reloads the shipment, and returns 200.
+  Other integrity errors propagate.
+- The API test injects a conflict; the PostgreSQL test reproduces the raw
+  two-session race. There is no real concurrent HTTP test combining both.
+- The worker has no equivalent route-level recovery: commit conflicts enter
+  retry classification and a later delivery can find the persisted event.
+- This does not serialize different event IDs for one shipment, compare
+  conflicting payloads for a reused ID, or guarantee exactly-once execution.
+  Handlers must remain free of external effects.
