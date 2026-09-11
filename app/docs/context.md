@@ -1,53 +1,53 @@
 # Current Technical Context: Freight Event Intelligence Platform
 
-> Revisado em 2026-09-10 contra o código, configuração e testes disponíveis.
-> Este documento descreve capacidades implementadas e limites conhecidos.
-> O README contém os comandos de execução; ADRs preservam decisões e evolução.
+> Reviewed on 2026-09-10 against the available code, configuration, and tests.
+> This document describes implemented capabilities and known limits.
+> The README contains the execution commands; ADRs preserve decisions and evolution.
 
-## 1. Estado atual
+## 1. Current state
 
-O monólito modular possui domínio, aplicação, FastAPI, persistência PostgreSQL,
-migrations Alembic, ingestão RabbitMQ, retries limitados, DLQ, Transactional
-Outbox e observabilidade (Fases 6 e 7). Isso não significa cobertura completa
-de todas as falhas de produção. Logs JSON, correlation IDs e métricas estão
-nos processos; Prometheus/Grafana são opcionais no Compose local.
+The modular monolith includes domain, application, FastAPI, PostgreSQL persistence,
+Alembic migrations, RabbitMQ ingestion, bounded retries, DLQ, Transactional
+Outbox, and observability (Phases 6 and 7). This does not imply complete
+coverage of all production failures. JSON logs, correlation IDs, and metrics are
+present in the processes; Prometheus/Grafana are optional in the local Compose setup.
 
-Não existem Inbox/processed_events, Redis, replay completo, tracing distribuído,
-agregação central de logs ou entrega de alertas de produção.
+There are no Inbox/processed_events, Redis, full replay, distributed tracing,
+centralized log aggregation, or production alert delivery.
 
-## 2. Estrutura e dependências
+## 2. Structure and dependencies
 
-| Diretório | Responsabilidade |
+| Directory | Responsibility |
 | --- | --- |
-| `app/domain/shipment/` | Entidade, eventos, state machine, handler e exceções |
-| `app/application/ports/` | Protocols de repositories e publisher |
-| `app/application/use_cases/` | Criação, consultas e recebimento de eventos |
-| `app/application/messaging/` | Contrato versionado e serialização |
-| `app/api/` | FastAPI, rotas, schemas Pydantic e dependências |
-| `app/infra/database/` | SQLAlchemy, models, mappers, repositories e sessão |
-| `app/infra/messaging/` | RabbitMQ e classificação de falhas |
-| `app/infra/observability/` | Contexto, logs JSON, métricas e backlog |
-| `app/infra/config.py` | Configuração por ambiente e carregamento de .env |
-| `app/workers/shipment_event_worker.py` | Montagem do consumer e transação por evento |
-| `app/workers/outbox_worker.py` | Relay confirmado e endpoint de métricas |
-| `monitoring/` | Prometheus e provisioning do Grafana |
-| `alembic/versions/` | Evolução do schema |
-| `tests/` | Testes de domínio, aplicação, API, infraestrutura e integração |
+| `app/domain/shipment/` | Entity, events, state machine, handler, and exceptions |
+| `app/application/ports/` | Repository and publisher protocols |
+| `app/application/use_cases/` | Event creation, queries, and receipt |
+| `app/application/messaging/` | Versioned contract and serialization |
+| `app/api/` | FastAPI routes, Pydantic schemas, and dependencies |
+| `app/infra/database/` | SQLAlchemy models, mappers, repositories, and session |
+| `app/infra/messaging/` | RabbitMQ and failure classification |
+| `app/infra/observability/` | Context, JSON logs, metrics, and backlog |
+| `app/infra/config.py` | Environment configuration and .env loading |
+| `app/workers/shipment_event_worker.py` | Consumer assembly and per-event transaction |
+| `app/workers/outbox_worker.py` | Confirmed relay and metrics endpoint |
+| `monitoring/` | Prometheus and Grafana provisioning |
+| `alembic/versions/` | Schema evolution |
+| `tests/` | Domain, application, API, infrastructure, and integration tests |
 
-Python 3.12+, FastAPI/Pydantic, SQLAlchemy 2 com psycopg, PostgreSQL 17 e Pika
-formam a stack. As versões exatas e tarefas ficam em
-[pyproject.toml](../../pyproject.toml). O domínio não depende de frameworks,
-banco ou broker. Casos de uso recebem ports por injeção; adapters reutilizam
-as mesmas regras. Repositories persistem e mappers convertem ORM/domínio.
+Python 3.12+, FastAPI/Pydantic, SQLAlchemy 2 with psycopg, PostgreSQL 17, and Pika
+form the stack. Exact versions and tasks are defined in
+[pyproject.toml](../../pyproject.toml). The domain does not depend on frameworks,
+database, or brokers. Use cases receive ports via injection; adapters reuse the same
+rules. Repositories persist data and mappers convert ORM/domain models.
 
-## 3. Domínio e eventos
+## 3. Domain and events
 
-`Shipment` é uma dataclass mutável. `Shipment.create()` inicia em `CREATED`.
-`ShipmentEvent` é uma dataclass `frozen=True, slots=True`, contendo
+`Shipment` is a mutable dataclass. `Shipment.create()` starts in `CREATED`.
+`ShipmentEvent` is a `frozen=True, slots=True` dataclass containing
 `event_id`, `shipment_id`, `event_type`, `source`, `occurred_at`,
-`received_at`, `payload` e `processing_status`. O congelamento impede
-reatribuir campos, mas não congela recursivamente um payload dict.
-`LocationUpdatedPayload` é uma dataclass imutável de latitude/longitude.
+`received_at`, `payload`, and `processing_status`. Freezing prevents field reassignment,
+but it does not recursively freeze a dict payload.
+`LocationUpdatedPayload` is an immutable dataclass for latitude/longitude.
 
 ```text
 CREATED --PICKUP_SCHEDULED--> SCHEDULED
@@ -59,217 +59,215 @@ DELAYED --SHIPMENT_DEPARTED--> IN_TRANSIT
 DELAYED --DELIVERED--> DELIVERED
 ```
 
-`ShipmentEventHandler` verifica a identidade da shipment, rejeita
-`SHIPMENT_CREATED`, normaliza localização e aplica a política temporal.
-`change_status()` consulta a state machine; `update_location()` altera
-coordenadas sem mudar status. Não há transição de lifecycle saindo de
-`DELIVERED`; localização é tratada separadamente pelo handler.
+`ShipmentEventHandler` validates shipment identity, rejects
+`SHIPMENT_CREATED`, normalizes location, and applies the temporal policy.
+`change_status()` consults the state machine; `update_location()` changes
+coordinates without changing status. There is no lifecycle transition leaving
+`DELIVERED`; location is handled separately by the handler.
 
-`occurred_at` representa o instante do fato; `received_at`, o registro na
-plataforma. A aplicação gera timestamps UTC. Envie timestamps com timezone:
-os contratos atuais não impõem timezone em todos os caminhos de entrada.
+`occurred_at` represents the moment the fact occurred; `received_at` represents
+registration in the platform. The application generates UTC timestamps. Send
+timestamps with timezones: current contracts do not enforce timezone on all input paths.
 
-## 4. Política temporal
+## 4. Temporal policy
 
-- Localização usa `last_location_at`; lifecycle usa `last_lifecycle_at`.
-- Eventos estritamente anteriores ao relógio correspondente recebem
-  `STORED_OUT_OF_ORDER` e permanecem no histórico sem alterar a projeção.
-- Timestamps iguais não são considerados atrasados.
-- Eventos não atrasados seguem atualização normal e recebem `APPLIED`.
-  Transições não cadastradas lançam `InvalidStateTransition`.
-- Lifecycle atrasado é classificado antes da state machine. Não existe
-  reconstrução do estado histórico para validar a transição no passado.
-- `updated_at` recebe `occurred_at` do último evento aplicado. Os dois
-  relógios são independentes; portanto `updated_at` não é um watermark
-  global monotônico.
-- Não há replay ou reconciliação de eventos posteriores.
+- Location uses `last_location_at`; lifecycle uses `last_lifecycle_at`.
+- Events strictly earlier than the corresponding clock receive
+  `STORED_OUT_OF_ORDER` and remain in history without altering the projection.
+- Equal timestamps are not considered late.
+- Non-late events follow the normal update path and receive `APPLIED`.
+  Unsupported transitions raise `InvalidStateTransition`.
+- Late lifecycle events are classified before the state machine. There is no
+  reconstruction of historical state to validate a transition in the past.
+- `updated_at` receives `occurred_at` from the last applied event. The two
+  clocks are independent; therefore `updated_at` is not a globally monotonic watermark.
+- There is no replay or reconciliation of later events.
 
-O handler não persiste, não deduplica, não controla transações e não publica.
+The handler does not persist, deduplicate, manage transactions, or publish.
 
-## 5. Aplicação e HTTP
+## 5. Application and HTTP
 
-Ports: `ShipmentRepository` oferece `get/save`;
-`ShipmentEventRepository`, `exists/save/list_by_shipment`;
-`ShipmentEventPublisher`, `publish`; `OutboxRepository` registra e seleciona
-intents; `RecordedEventPublisher` publica notificações de fatos registrados.
+Ports: `ShipmentRepository` provides `get/save`;
+`ShipmentEventRepository` provides `exists/save/list_by_shipment`;
+`ShipmentEventPublisher` provides `publish`; `OutboxRepository` records and selects
+intents; `RecordedEventPublisher` publishes notifications for recorded facts.
 
-`CreateShipment` gera UUID e horário UTC, cria entidade e evento histórico
-`SHIPMENT_CREATED` com `source = platform`, e salva ambos.
+`CreateShipment` generates a UUID and UTC time, creates the entity and historical
+`SHIPMENT_CREATED` event with `source = platform`, and saves both.
 `Shipment.created_at == creation_event.occurred_at`.
-O evento não representa uma transição `CREATED -> CREATED`. Criação e ingestão
-também registram um intent de publicação na mesma transação, com correlation ID
-opcional passado explicitamente pelos adapters. O domínio não recebe metadados
-de observabilidade.
+The event does not represent a `CREATED -> CREATED` transition. Creation and ingestion
+also record a publication intent in the same transaction, with an optional correlation ID
+passed explicitly by adapters. The domain does not receive observability metadata.
 
-`ReceiveShipmentEvent` rejeita criação externa, carrega a shipment, verifica
-`event_id`, chama o handler, registra o resultado por `dataclasses.replace`
-e salva histórico/projeção. Duplicata sequencial retorna a shipment sem
-reaplicar o evento. Não há comparação de payloads para IDs repetidos.
+`ReceiveShipmentEvent` rejects external creation, loads the shipment, verifies
+`event_id`, calls the handler, registers the result via `dataclasses.replace`,
+and saves the history/projection. A sequential duplicate returns the shipment without
+reapplying the event. There is no payload comparison for repeated IDs.
 
-| Endpoint | Comportamento |
+| Endpoint | Behavior |
 | --- | --- |
-| `GET /health` | 200 com `{"status": "ok"}`; não verifica banco/broker |
-| `GET /metrics` | Métricas Prometheus do processo da API |
-| `POST /shipments` | 201 com ShipmentResponse; única criação pública |
-| `GET /shipments/{shipment_id}` | 200 ou 404 |
-| `GET /shipments/{shipment_id}/events` | 200, lista por occurred_at; ID inexistente retorna [] |
-| `POST /events` | Síncrono, 200 com ShipmentResponse; não publica no broker |
+| `GET /health` | 200 with `{"status": "ok"}`; does not check the database or broker |
+| `GET /metrics` | Prometheus metrics for the API process |
+| `POST /shipments` | 201 with ShipmentResponse; the only public creation endpoint |
+| `GET /shipments/{shipment_id}` | 200 or 404 |
+| `GET /shipments/{shipment_id}/events` | 200, ordered by occurred_at; missing IDs return [] |
+| `POST /events` | Synchronous, 200 with ShipmentResponse; does not publish to the broker |
 
-No recebimento HTTP, shipment inexistente retorna 404, transição inválida 409
-e `SHIPMENT_CREATED` 422. Schemas validam UUIDs, tipos e campos obrigatórios;
-localização exige números, excluindo booleanos. Não há validação geográfica
-de limites de latitude/longitude. DTOs HTTP são convertidos para inputs da
-aplicação. Histórico expõe `processing_status`.
+On HTTP ingest, a missing shipment returns 404, an invalid transition returns 409,
+and `SHIPMENT_CREATED` returns 422. Schemas validate UUIDs, types, and required fields;
+location requires numeric values and excludes booleans. There is no geographic validation
+of latitude/longitude limits. HTTP DTOs are converted to application inputs. History exposes
+`processing_status`.
 
-## 6. Persistência e atomicidade
+## 6. Persistence and atomicity
 
-`DATABASE_URL` é obrigatório; não há fallback de URL na aplicação.
-`SessionLocal` usa `autoflush=False` e `expire_on_commit=False`.
-`get_db()` fornece a mesma sessão aos repositories da request, faz commit no
-sucesso, rollback na exceção e fecha a sessão. Repositories não fazem commit.
-Não existe uma abstração dedicada de Unit of Work.
+`DATABASE_URL` is required; there is no URL fallback in the application.
+`SessionLocal` uses `autoflush=False` and `expire_on_commit=False`.
+`get_db()` provides the same session to request repositories, commits on success,
+rolls back on exceptions, and closes the session. Repositories do not commit.
+There is no dedicated Unit of Work abstraction.
 
-`shipments` armazena a projeção, referência única, status, timestamps,
-coordenadas, `last_location_at` e `last_lifecycle_at`.
-`shipment_events` tem PK `event_id`, FK para shipment, payload JSONB,
-timestamps e `processing_status`. Mappers preservam enums e payloads.
+`shipments` stores the projection, unique reference, status, timestamps,
+coordinates, `last_location_at`, and `last_lifecycle_at`.
+`shipment_events` has a PK `event_id`, FK to shipment, JSONB payload,
+timestamps, and `processing_status`. Mappers preserve enums and payloads.
 
-Migrations existentes, em ordem:
+Existing migrations, in order:
 
-1. `34fe2111c108`: cria shipments e shipment_events, constraints e índices.
-2. `6f8e4c7a1b2d`: adiciona localização.
-3. `8b7c3d2e1f0a`: adiciona last_lifecycle_at e processing_status.
-4. `9c8d7e6f5a4b`: adiciona outbox_events e índice parcial de pendências.
-5. `a1b2c3d4e5f6`: adiciona correlation_id nullable à outbox, sem alterar bodies.
+1. `34fe2111c108`: creates shipments and shipment_events, constraints, and indexes.
+2. `6f8e4c7a1b2d`: adds location.
+3. `8b7c3d2e1f0a`: adds `last_lifecycle_at` and `processing_status`.
+4. `9c8d7e6f5a4b`: adds `outbox_events` and a partial pending index.
+5. `a1b2c3d4e5f6`: adds nullable `correlation_id` to the outbox without altering bodies.
 
-Alembic utiliza a configuração de ambiente. Revise migrations autogeradas.
-O fluxo de criação mantém entidade e histórico na mesma transação.
+Alembic uses the environment configuration. Review autogenerated migrations.
+The creation flow keeps the entity and history in the same transaction.
 
-## 7. Idempotência e concorrência
+## 7. Idempotency and concurrency
 
-O check `exists(event_id)` não é atômico. A PK PostgreSQL impede duas linhas
-com a mesma identidade. A rota HTTP executa flush e, especificamente para
-`shipment_events_pkey`, faz rollback e retorna a projeção recarregada.
-Outros `IntegrityError` são propagados.
+The `exists(event_id)` check is not atomic. The PostgreSQL PK prevents two rows
+with the same identity. The HTTP route performs a flush and, specifically for
+`shipment_events_pkey`, rolls back and returns the reloaded projection.
+Other `IntegrityError` exceptions are propagated.
 
-O worker não implementa essa recuperação HTTP: uma colisão na persistência
-entra na classificação/retry de falhas; nova entrega pode encontrar o evento
-já persistido. A deduplicação não serializa eventos distintos de uma shipment,
-não impede lost updates em geral e não garante execução única do handler.
-Por isso o handler deve continuar sem efeitos externos.
+The worker does not implement this HTTP recovery path: a persistence collision is
+classified as a failure and retried; a redelivery may find the event already persisted.
+Deduplication does not serialize distinct events for a shipment, does not prevent
+general lost updates, and does not guarantee single execution of the handler.
+For that reason, the handler must remain free of side effects.
 
-## 8. RabbitMQ e recuperação
+## 8. RabbitMQ and recovery
 
-`ShipmentEventMessage` serializa JSON determinístico com
-`contract_version = v1`, message_id, event_id, shipment_id, event_type,
-source, occurred_at, received_at e payload dict. A routing key é
-`shipment.event.received.v1` e a exchange principal padrão é
-`freight.shipment-events`. `event_id` continua sendo a identidade de negócio.
+`ShipmentEventMessage` serializes deterministic JSON with
+`contract_version = v1`, `message_id`, `event_id`, `shipment_id`, `event_type`,
+`source`, `occurred_at`, `received_at`, and a payload dict. The routing key is
+`shipment.event.received.v1`, and the default primary exchange is
+`freight.shipment-events`. `event_id` remains the business identity.
 
-O worker declara a topologia, usa prefetch 1, desserializa a mensagem e chama
-`ReceiveShipmentEvent` em uma sessão. O callback retorna após commit; então
-o consumer envia ACK. O publisher declara a exchange, mas não a fila principal:
-a topologia deve existir antes da publicação.
+The worker declares the topology, uses prefetch 1, deserializes the message, and calls
+`ReceiveShipmentEvent` in a session. The callback returns after commit; then the consumer
+sends ACK. The publisher declares the exchange but not the main queue: the topology must
+exist before publishing.
 
-`ShipmentEventFailureClassifier` envia ValueError e exceções de negócio à
-DLQ. OperationalError, OSError, TimeoutError e exceções desconhecidas recebem
-retry limitado. TTL da fila de retry retorna à exchange principal.
-Defaults: 5000 ms de espera e três tentativas totais.
+`ShipmentEventFailureClassifier` sends `ValueError` and business exceptions to the DLQ.
+`OperationalError`, `OSError`, `TimeoutError`, and unknown exceptions receive bounded retry.
+The retry queue TTL returns messages to the main exchange.
+Defaults: 5000 ms wait and three total attempts.
 
-O corpo original é preservado. Headers incluem `x-attempt-count`,
-`x-first-failed-at`, `x-last-error-type` e `x-last-error-message` (até 500
-caracteres). O consumer envia ACK após `basic_publish` retornar. Não há
-publisher confirms nem mandatory routing; esse retorno não comprova aceitação
-durável ou roteamento. Falhas entre publish e ACK também permitem duplicatas.
-Não se deve afirmar entrega exatamente uma vez ou ausência de perda.
+The original body is preserved. Headers include `x-attempt-count`,
+`x-first-failed-at`, `x-last-error-type`, and `x-last-error-message` (up to 500
+characters). The consumer sends ACK after `basic_publish` returns. There are no
+publisher confirms or mandatory routing; this return does not prove durable acceptance
+or routing. Failures between publish and ACK also allow duplicates.
+One should not claim exactly-once delivery or losslessness.
 
-O Compose configura volume RabbitMQ e identidade estável. Isso não migra dados
-de containers antigos. A limitação de confirms acima se refere ao fluxo inbound;
-o relay outbound usa confirmações e mandatory routing.
+Compose configures a persistent RabbitMQ volume and stable identity. This does not migrate
+data from old containers. The confirms limitation above applies to the inbound flow;
+the outbound relay uses confirmations and mandatory routing.
 
 ### Transactional Outbox (ADR-008)
 
-Criação, eventos aplicados e atrasados produzem um intent por evento/tipo,
-independentemente de HTTP ou RabbitMQ. Duplicatas não criam outro; histórico
-anterior não é backfilled. O repository faz flush ordenado dos pais para que
-conflitos de event_id continuem surgindo antes da constraint da outbox.
+Creation, applied events, and late events each produce a publication intent per event/type,
+regardless of HTTP or RabbitMQ. Duplicates do not create another record; earlier history is
+not backfilled. The repository performs ordered flushing of parents so that `event_id`
+conflicts continue surfacing before the outbox constraint.
 
-O relay seleciona uma linha devida com FOR UPDATE SKIP LOCKED e mantém a
-transação durante I/O limitado no broker. Publica o envelope armazenado
-`shipment.event.recorded.v1` com ID estável, confirmações e mandatory routing;
-depois grava published_at e faz commit. Falhas ficam pendentes com atraso fixo.
-Falha após confirmação e antes de commit permite republicação idêntica. Não
-há garantia de exactly-once ou ordenação por shipment. Attempts conta operações
-registradas duravelmente, não todas as tentativas interrompidas.
+The relay selects an eligible row with `FOR UPDATE SKIP LOCKED` and keeps the transaction
+open during limited broker I/O. It publishes the stored envelope
+`shipment.event.recorded.v1` with a stable ID, confirmations, and mandatory routing;
+then it writes `published_at` and commits. Failures remain pending with a fixed delay.
+A failure after confirmation and before commit allows identical republication. There is no
+exactly-once guarantee or per-shipment ordering. `Attempts` counts durably recorded operations,
+not every interrupted retry attempt.
 
-A exchange `freight.shipment-notifications` e fila
-`freight.shipment-event-notifications` são separadas da ingestão. Sem consumidor
-downstream incluído. Repositories não fazem commit; limites transacionais
-existentes continuam donos do commit/rollback.
+The `freight.shipment-notifications` exchange and
+`freight.shipment-event-notifications` queue are separate from ingestion. No downstream
+consumer is included. Repositories do not commit; existing transactional boundaries remain
+responsible for commit/rollback.
 
-### Observabilidade (ADR-009)
+### Observability (ADR-009)
 
-Middleware ASGI mantém correlation ID isolado por request, inclusive nos handlers
-síncronos. X-Correlation-ID aceita 1–64 caracteres ASCII alfanuméricos, ponto,
-hífen e underscore; outros valores geram UUID. A resposta retorna o ID. Outbox
-persiste o metadado numa coluna nullable, enviado como AMQP correlation_id.
-Retries/DLQ preservam o ID. Outbox antiga usa message_id como fallback; inbound
-sem correlation usa message_id válido ou um UUID. Bodies v1 não mudam.
+The ASGI middleware keeps the correlation ID isolated per request, including for synchronous
+handlers. `X-Correlation-ID` accepts 1–64 ASCII alphanumeric characters, dots, hyphens,
+and underscores; other values generate a UUID. The response returns the ID. The outbox persists
+the metadata in a nullable column, sent as the AMQP `correlation_id`.
+Retries/DLQ preserve the ID. Old outbox rows use `message_id` as a fallback; inbound messages
+without correlation use a valid `message_id` or a UUID. v1 bodies remain unchanged.
 
-Logs JSON usam allowlist: timestamp UTC, component, operation, outcome, duração,
-IDs disponíveis e classe de erro. Não renderizam mensagens livres, SQL, URLs,
-payloads ou strings de exceção. Bibliotecas perdem detalhes da mensagem; logger,
-nível e classe de erro continuam disponíveis.
+JSON logs use an allowlist: UTC timestamp, component, operation, outcome, duration,
+available IDs, and error class. They do not render free-form messages, SQL, URLs,
+payloads, or exception strings. Libraries may lose message details; logger,
+level, and error class remain available.
 
-API /metrics e workers 9101/9102 possuem registries de processo. Labels limitados
-usam templates de rota, método normalizado, status e outcomes; nunca IDs.
-Counters resetam no restart e contam observações, não eventos únicos.
-`broker_confirmed` não significa `published_committed`. Ingestion `committed`
-inclui duplicatas bem-sucedidas; `publish_returned` de retry/DLQ não é confirmação.
+The API `/metrics` endpoint and workers on 9101/9102 each have their own process registries.
+Limited labels use route templates, normalized methods, status, and outcomes; never IDs.
+Counters reset on restart and count observations, not unique events.
+`broker_confirmed` does not mean `published_committed`. Ingestion `committed`
+includes successful duplicates; `publish_returned` from retry/DLQ is not confirmation.
 
-Backlog é consultado em sessão independente com pool pequeno, connect timeout e
-statement timeout; conta também retries futuros. Falha emite collection_success=0
-e omite gauges, sem inventar fila vazia. Use max, não sum, ao agregar backlog de
-vários relays. Um processo por target/porta; multiprocess Uvicorn não é agregado.
-Monitoring profile opcional fornece Prometheus e dashboard Grafana local.
+Backlog is queried in an independent session with a small pool, connect timeout, and statement
+timeout; it also counts future retries. Failure emits `collection_success=0` and omits gauges
+without inventing an empty queue. Use `max`, not `sum`, when aggregating backlog across multiple
+relays. One process per target/port; multiprocess Uvicorn is not aggregated.
+The optional monitoring profile provides local Prometheus and Grafana dashboards.
 
-## 9. Testes e validação
+## 9. Tests and validation
 
-Validação executada em 2026-09-10:
+Validation executed on 2026-09-10:
 
-- Baseline da Fase 6: 65 testes default e 29 de integração passaram. O gate
-  inicial encontrou formatação em recorded_event_message.py, corrigida nesta fase.
-- `task check`: formatação, lint e **79 testes default passaram**; 32 testes de
-  integração excluídos por configuração. `task compile` passou.
-- Integração PostgreSQL/RabbitMQ: **32 passaram**, carregando `.env` antes da
-  coleta e usando exclusivamente `freight_events_test` e recursos isolados.
-- Migration revalidada após ampliar cobertura: upgrade/downgrade da coluna de
-  correlação preserva outbox populada; downgrade da outbox preserva histórico.
-- `docker compose --profile monitoring config --quiet` e `promtool check config`
-  passaram. Grafana carregou o dashboard provisionado com 10 painéis.
-- Smoke com entry points reais, banco de testes e filas isoladas: três targets
-  Prometheus UP, correlation header na API e coleta de backlog saudável. Processos
-  temporários foram encerrados e recursos de broker do smoke removidos.
+- Phase 6 baseline: 65 default tests and 29 integration tests passed. The initial gate found
+  formatting issues in `recorded_event_message.py`, which were fixed in this phase.
+- `task check`: formatting, linting, and **79 default tests passed**; 32 integration tests were
+  excluded by configuration. `task compile` passed.
+- PostgreSQL/RabbitMQ integration: **32 passed**, loading `.env` before collection and using
+  exclusively `freight_events_test` and isolated resources.
+- Migration revalidated after expanding coverage: upgrade/downgrade of the correlation column
+  preserves a populated outbox; downgrading the outbox preserves history.
+- `docker compose --profile monitoring config --quiet` and `promtool check config` passed.
+  Grafana loaded the provisioned dashboard with 10 panels.
+- Smoke tests with real entry points, test database, and isolated queues: three Prometheus targets
+  were UP, the correlation header was present in the API, and backlog collection was healthy.
+  Temporary processes were terminated and broker resources from the smoke test were cleaned up.
 
-Cobertura inclui rollback após flush, corrida HTTP concorrente real, locks de
-relay, confirmação seguida de falha de commit, republicação com identidade/body
-e correlation ID estáveis, 422 para criação externa, commit antes de ACK no
-callback de produção, deadlines de broker, isolamento de contextos concorrentes,
-logs sem strings sensíveis, métricas de falha e propagação HTTP → banco → broker.
+Coverage includes rollback after flush, real concurrent HTTP races, relay locks,
+confirmation followed by commit failure, republication with stable identity/body and correlation ID,
+422 for external creation, commit before ACK in the producer callback, broker deadlines,
+context isolation, logs without sensitive strings, failure metrics, and HTTP → database → broker
+propagation.
 
-Advertências não bloqueantes: depreciações Starlette/AnyIO e constante HTTP 422;
-o sandbox também impediu escrita do cache opcional do pytest no `task check`.
-Integração foi executada com `-p no:cacheprovider`. Um conflito inicial entre
-nomes de módulos de teste foi corrigido antes da execução completa.
+Non-blocking warnings: Starlette/AnyIO deprecations and a constant HTTP 422; the sandbox also
+prevented writing the optional pytest cache during `task check`.
+Integration was executed with `-p no:cacheprovider`. An initial naming conflict between test
+modules was resolved before the full run completed.
 
-Veja [README](../../README.md#integration-tests) para carregar URLs antes da
-coleta. O banco deve se chamar exatamente `freight_events_test`; fixtures
-aplicam migrations e limpam tabelas. RabbitMQ usa `TEST_RABBITMQ_URL`.
-Não execute esses fixtures no banco de desenvolvimento.
+See [README](../../README.md#integration-tests) to load URLs before collection. The database must
+be named exactly `freight_events_test`; fixtures apply migrations and clean tables. RabbitMQ uses
+`TEST_RABBITMQ_URL`.
+Do not run these fixtures against the development database.
 
-## 10. Próximas decisões
+## 10. Next decisions
 
-ADR-008 e ADR-009 registram as Fases 6 e 7. Próximas decisões dependem de
-requisitos: confirms/routing no retry/DLQ inbound, retenção da outbox, alertas,
-agregação de logs ou tracing. Monitoramento não altera garantias de entrega.
-Sem migrations aplicadas ao banco de desenvolvimento nesta implementação.
+ADR-008 and ADR-009 record Phases 6 and 7. Future decisions depend on requirements: confirms/
+routing for inbound retry/DLQ, outbox retention, alerts, log aggregation, or tracing. Monitoring
+does not change delivery guarantees.
+No migrations are applied to the development database in this implementation.
